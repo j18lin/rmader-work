@@ -45,6 +45,37 @@ motion consistency stop at 95 s. Those runs fail the odometry gate. Truth
 mode demonstrates the planner and differential drive connection while
 that localization issue remains.
 
+After the ground-planner change, separate 120 s and 240 s DLIO-controlled
+trials passed all applicable gates. The 240 s run reached ten legs per rover;
+maximum DLIO position error was 0.036 m for JR81 and 0.027 m for RR83,
+minimum chassis clearance was 0.898 m, and no odometry fault was recorded.
+These runs show DLIO control works in this arena under these conditions; the
+older intermittent JR81 failure is not explained by them.
+
+The bridge now latches a stop if consecutive DLIO poses imply translation or
+heading faster than the rover can achieve. A test-only 2 m JR81 pose jump at
+40 s triggered this check. The command trace reached zero within 0.06 s,
+remained zero, and simulator truth showed only 0.028 m of path length in the
+next 2 s. The injected run intentionally fails the normal odometry grade;
+`scripts/audit_rmader_fault_stop.py` in the simulator checkout grades its
+fail-stop response separately. The drive image's offline geofence end-to-end
+suite passed 30/30 checks, including stale-limit and invalid-intent holds.
+A further normal 120 s DLIO-controlled run with the plausibility guard enabled
+passed all gates without a false trip; maximum DLIO errors were 0.033 m and
+0.032 m for JR81 and RR83.
+
+To repeat the fail-stop test, set `RMADER_STATE_SOURCE=dlio`,
+`RMADER_DURATION_S=65`, and `RMADER_INJECT_JR81_DLIO_JUMP_AT=40` when calling
+`integration/run_live.sh`. Its normal grade exits nonzero because the injected
+fault must fail the odometry gate. Then run
+`python3 ../rover_sim_dev/scripts/audit_rmader_fault_stop.py` on the saved
+`rmader_recording.json` with `--out` to check stop latency and path length.
+
+No physical rover was connected. The live integration does not engage the
+drive-level geofence or feed static obstacle geometry, and it has no physical
+sensor, wheel, terrain, or emergency-stop measurements. These simulation
+results cannot establish hardware safety.
+
 An earlier 120 s truth-state run passed its applicable gates: five legs per rover,
 0.926 m minimum chassis clearance, no world box contact, peer subscriptions
 in both directions, and minimum real time factor 0.998. Its DLIO diagnostic
