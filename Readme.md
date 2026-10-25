@@ -123,3 +123,7 @@ sudo cp libgurobi_c++.a ../../lib/
 This package uses some C++ classes from the [DecompROS](https://github.com/sikang/DecompROS) repo (included in the `thirdparty` folder).
 
 > **Approval for release**: This code was approved for release by The Boeing Company in [NEED TO FILL]. 
+
+## NLOPT two-agent test on this checkout
+
+See [UGV_NOTES.md](UGV_NOTES.md) for the Docker build, closed-loop timing test, results, and scope.

@@ -5,3 +5,6 @@
 *.lyx#
 *.bag
 *.m~
+
+test-results/
+tests/__pycache__/

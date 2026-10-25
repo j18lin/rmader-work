@@ -1,0 +1,36 @@
+<launch>
+  <group ns="SQ01s">
+    <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
+      <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
+      <rosparam param="agents_ids">[1, 2]</rosparam>
+      <param name="visual/is_visual" value="false"/>
+      <param name="is_replan_after_goal_reached" value="true"/>
+      <rosparam param="tuning_param/v_max">[2.0, 2.0, 2.0]</rosparam>
+      <rosparam param="tuning_param/a_max">[4.0, 4.0, 4.0]</rosparam>
+      <rosparam param="tuning_param/j_max">[8.0, 8.0, 8.0]</rosparam>
+      <rosparam param="tuning_param/drone_bbox">[0.35, 0.35, 0.35]</rosparam>
+      <param name="tuning_param/delay_check_sec" value="0.05"/>
+      <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
+      <remap from="~state" to="/SQ01s/state"/>
+      <remap from="~term_goal" to="/SQ01s/term_goal"/>
+      <remap from="~goal" to="/SQ01s/goal"/>
+    </node>
+  </group>
+  <group ns="SQ02s">
+    <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
+      <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
+      <rosparam param="agents_ids">[1, 2]</rosparam>
+      <param name="visual/is_visual" value="false"/>
+      <param name="is_replan_after_goal_reached" value="true"/>
+      <rosparam param="tuning_param/v_max">[2.0, 2.0, 2.0]</rosparam>
+      <rosparam param="tuning_param/a_max">[4.0, 4.0, 4.0]</rosparam>
+      <rosparam param="tuning_param/j_max">[8.0, 8.0, 8.0]</rosparam>
+      <rosparam param="tuning_param/drone_bbox">[0.35, 0.35, 0.35]</rosparam>
+      <param name="tuning_param/delay_check_sec" value="0.05"/>
+      <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
+      <remap from="~state" to="/SQ02s/state"/>
+      <remap from="~term_goal" to="/SQ02s/term_goal"/>
+      <remap from="~goal" to="/SQ02s/goal"/>
+    </node>
+  </group>
+</launch>

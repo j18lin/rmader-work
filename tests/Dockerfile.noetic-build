@@ -1,0 +1,14 @@
+FROM ros:noetic-ros-base-focal
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config python3-catkin-tools python3-numpy \
+    libeigen3-dev libcgal-dev libnlopt-dev libnlopt-cxx-dev libglpk-dev libboost-all-dev \
+    ros-noetic-cmake-modules ros-noetic-rviz ros-noetic-rviz-visual-tools \
+    ros-noetic-jsk-rviz-plugins ros-noetic-gazebo-msgs ros-noetic-tf \
+    ros-noetic-roscpp ros-noetic-rospy ros-noetic-roslaunch \
+    ros-noetic-message-generation \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /ws

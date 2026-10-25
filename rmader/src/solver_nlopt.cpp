@@ -301,7 +301,9 @@ void SolverNlopt::generateAStarGuess()
   std::vector<Eigen::Vector3d> q;
   std::vector<Eigen::Vector3d> n;
   std::vector<double> d;
-  bool is_feasible = octopusSolver_->run(q, n, d);
+  bool is_stuck = false;
+  bool is_q0_fail = false;
+  bool is_feasible = octopusSolver_->run(q, n, d, is_stuck, is_q0_fail);
 
   num_of_LPs_run_ = octopusSolver_->getNumOfLPsRun();
   // std::cout << "After Running solved, n= " << std::endl;
@@ -1775,6 +1777,16 @@ void *func(void *arg)
 
   // exit the current thread
   pthread_exit(NULL);
+}
+
+bool SolverNlopt::optimize(bool &is_stuck, bool &is_A_star_failed, bool &is_q0_fail)
+{
+  // The NLOPT path predates the three status outputs used by Rmader.
+  // It reports success through optimize() and does not classify these failures.
+  is_stuck = false;
+  is_A_star_failed = false;
+  is_q0_fail = false;
+  return optimize();
 }
 
 bool SolverNlopt::optimize()

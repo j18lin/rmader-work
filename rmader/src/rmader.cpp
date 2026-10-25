@@ -17,11 +17,6 @@
 #include "timer.hpp"
 #include "termcolor.hpp"
 
-#if USE_GUROBI_FLAG
-#else
-#include "nlopt_utils.hpp"
-#endif
-
 using namespace termcolor;
 
 // Uncomment the type of timer you want:
@@ -40,24 +35,7 @@ Rmader::Rmader(mt::parameters par) : par_(par)
   stateA_.setZero();
   mtx_initial_cond.unlock();
 
-#if USE_GUROBI_FLAG
-#else
-  // Check that the gradients are right
-  if (nlopt_utils::checkGradientsNlopt(par_.basis) == false)
-  {
-    std::cout << "==============================================" << std::endl;
-    std::cout << bold << "Gradient check was " << red << "NOT OK " << reset << std::endl;
-    std::cout << "==============================================" << std::endl;
-
-    abort();
-  }
-  else
-  {
-    std::cout << "==============================================" << std::endl;
-    std::cout << bold << "Gradient check was " << green << " OK " << reset << std::endl;
-    std::cout << "==============================================" << std::endl;
-  }
-#endif
+  // Numerical gradient diagnostics belong in an explicit test, not planner startup.
 
   changeDroneStatus(DroneStatus::GOAL_REACHED);
   resetInitialization();

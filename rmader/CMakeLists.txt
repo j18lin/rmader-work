@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(rmader)
 
-## Add support for C++11, supported in ROS Kinetic and newer
-add_definitions(-std=c++11)
+## Ubuntu 20.04's CGAL headers need C++17.
+add_definitions(-std=c++17)
 #add_definitions(-std=c99)
 
 
@@ -114,6 +114,6 @@ target_link_libraries(test_bspline_utils ${catkin_LIBRARIES})
 
 add_executable(test_stuck_exam_octopus_search src/examples/test_stuck_exam_octopus_search.cpp src/octopus_search.cpp src/bspline_utils.cpp) 
 add_dependencies(test_stuck_exam_octopus_search ${catkin_EXPORTED_TARGETS} )
-target_link_libraries(test_stuck_exam_octopus_search ${catkin_LIBRARIES} utils cgal_utils) 
+target_link_libraries(test_stuck_exam_octopus_search ${catkin_LIBRARIES} utils cgal_utils)
 
-unset(USE_GUROBI CACHE) # To avoid https://stackoverflow.com/questions/22481647/cmake-if-else-with-option
+# Retain USE_GUROBI in the cache so -DUSE_GUROBI=OFF survives reconfigure.
