@@ -28,10 +28,11 @@ used only for the initial drive and independent grading.
 
 The two rovers repeatedly visit opposite sides of the arena and return.
 The evaluator saves rmader_recording.json and rmader_grade.json. It checks
-two completed legs per rover, both agents' setpoints and committed
-trajectories, direct peer subscriptions, chassis separation and world
-contacts from Gazebo truth and URDF footprints, DLIO error, and real time
-factor. The simulator uses the rover safety nodes and records real DLIO as
+at least two completed legs per rover in short trials or three in 120 s trials,
+both agents' setpoints and committed
+trajectories, planned yaw rate and vertical motion, direct peer subscriptions,
+chassis separation and world contacts from Gazebo truth and URDF footprints,
+DLIO error, and real time factor. The simulator uses the rover safety nodes and records real DLIO as
 a diagnostic in truth mode. Its DLIO odometry gate is N/A in truth mode.
 The fallback mapping stack is omitted because this integration does not
 feed static obstacle geometry into R-MADER; the driven arena corridor is
@@ -44,16 +45,37 @@ motion consistency stop at 95 s. Those runs fail the odometry gate. Truth
 mode demonstrates the planner and differential drive connection while
 that localization issue remains.
 
-The 120 s truth-state run passed its applicable gates: five legs per rover,
+An earlier 120 s truth-state run passed its applicable gates: five legs per rover,
 0.926 m minimum chassis clearance, no world box contact, peer subscriptions
 in both directions, and minimum real time factor 0.998. Its DLIO diagnostic
 still showed 9.108 m maximum JR81 error. The JSON reports retain the full
 time series and the N/A odometry gate.
 
-This is a ground rover adaptation of the aerial planner with a bounded
-unicycle tracker. Its trajectory optimizer remains holonomic in the XY
-plane, so successful simulator runs do not prove dynamic feasibility or
-collision safety on arbitrary terrain or hardware.
+With ground constraints and new-goal spline reset, a 120 s truth-state run
+passed the stricter three-leg gate: four legs per rover, 46 trajectories and
+41 committed trajectories per planner, 0.914 m minimum chassis clearance,
+no world box contact, and minimum real time factor 0.999. Both planners
+reported zero yaw-rate violations and negligible vertical motion. The arena
+legs were nearly straight, so this run does not stress tight curved paths.
+
+Ground mode now adds planar forward-heading and yaw-rate constraints to the
+NLopt spline optimizer. The initial spline tangent must lie within 0.5 rad of
+the rover's heading. At samples throughout the path, planar curvature is
+limited to a 0.8 rad/s yaw rate above near-zero speed, and dense validation
+rejects unsampled violations and abrupt tangent reversals through a stop.
+Setpoint yaw follows the path tangent.
+The bridge rotates a rover in place before sending a goal that points behind
+it. On a new ground goal, the planner clears the previous goal's spline and
+starts from the next measured rover pose and heading. The aerial planner is
+unchanged when ground mode is disabled. Ground mode
+requires the NLopt backend; the Gurobi backend does not implement these
+constraints.
+
+These are sampled geometric constraints on a position spline, not a full
+differential-drive trajectory optimization with an explicit heading state and
+wheel dynamics. The tracker still handles acceleration, steering, and stops.
+Successful simulator runs do not establish collision safety on arbitrary
+terrain or hardware. DLIO divergence remains a separate localization issue.
 
 ## Aerial precursor
 

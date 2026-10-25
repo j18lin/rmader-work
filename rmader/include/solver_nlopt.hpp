@@ -139,6 +139,10 @@ private:
                           const std::vector<double> &d);
 
   void initializeNumOfConstraints();
+  void groundKinematics(const std::vector<Eigen::Vector3d> &q, int segment, double u,
+                        Eigen::Vector3d &velocity, Eigen::Vector3d &acceleration,
+                        Eigen::Vector4d &dv_dq, Eigen::Vector4d &da_dq) const;
+  bool groundPathFeasible(const std::vector<Eigen::Vector3d> &q) const;
 
   void printInfeasibleConstraints(std::vector<Eigen::Vector3d> &q, std::vector<Eigen::Vector3d> &n,
                                   std::vector<double> &d);
@@ -219,6 +223,9 @@ private:
   double deltaT_;
   Eigen::Vector3d v_max_;
   Eigen::Vector3d a_max_;
+  bool ground_robot_ = false;
+  double ground_max_yaw_rate_ = 0.8;
+  double ground_heading_cone_rad_ = 0.5;
 
   double weight_ = 10000;
   double weight_modified_ = 10000;

@@ -7,6 +7,9 @@ namespace ms  // rmader solver
 {
 struct par_solver
 {
+  bool ground_robot = false;
+  double ground_max_yaw_rate = 0.8;
+  double ground_heading_cone_rad = 0.5;
   ///// Will not change between iterations
   double x_min = -std::numeric_limits<double>::max();
   double x_max = std::numeric_limits<double>::max();

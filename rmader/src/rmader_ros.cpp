@@ -21,6 +21,7 @@
 
 #include <stdlib.h> /* srand, rand */
 #include <time.h>   /* time */
+#include <stdexcept>
 
 typedef RMADER_timers::Timer MyTimer;
 
@@ -91,6 +92,16 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
 
   mu::safeGetParam(nh1_, "setting/dc", par_.dc);
   mu::safeGetParam(nh1_, "setting/goal_radius", par_.goal_radius);
+  nh1_.param("ground_robot/enabled", par_.ground_robot, false);
+  nh1_.param("ground_robot/max_yaw_rate", par_.ground_max_yaw_rate, 0.8);
+  nh1_.param("ground_robot/heading_cone_rad", par_.ground_heading_cone_rad, 0.5);
+  if (par_.ground_robot &&
+      (par_.ground_max_yaw_rate <= 0.0 || par_.ground_heading_cone_rad <= 0.0 ||
+       par_.ground_heading_cone_rad >= 1.4))
+  {
+    ROS_FATAL("Invalid ground_robot yaw or heading limits");
+    throw std::invalid_argument("ground_robot limits");
+  }
 
   // since drone_bbox is a vector, you need a workaround like this
   std::vector<double> drone_bbox_tmp;

@@ -20,7 +20,9 @@ class Bridge:
         self.lock = threading.Lock()
         self.states = {}
         self.goals = {}
-        self.counts = {name: {"setpoints": 0, "trajs": 0, "committed": 0} for name in NAMES}
+        self.counts = {name: {"setpoints": 0, "trajs": 0, "committed": 0,
+                              "max_plan_yaw_rate": 0.0, "yaw_rate_violations": 0,
+                              "max_abs_vertical": 0.0} for name in NAMES}
         self.last_setpoint = {name: 0.0 for name in NAMES}
         for name, ns in NAMES.items():
             self.states[name] = rospy.Publisher("/" + ns + "/state", State, queue_size=5)
@@ -42,6 +44,16 @@ class Bridge:
     def on_setpoint(self, msg, name):
         self.counts[name]["setpoints"] += 1
         self.last_setpoint[name] = time.monotonic()
+        vertical = max(abs(msg.p.z), abs(msg.v.z), abs(msg.a.z), abs(msg.j.z))
+        self.counts[name]["max_abs_vertical"] = max(
+            self.counts[name]["max_abs_vertical"], vertical)
+        speed2 = msg.v.x**2 + msg.v.y**2
+        if speed2 >= 0.15**2:
+            rate = abs(msg.v.x*msg.a.y - msg.v.y*msg.a.x) / speed2
+            self.counts[name]["max_plan_yaw_rate"] = max(
+                self.counts[name]["max_plan_yaw_rate"], rate)
+            if rate > 0.95:
+                self.counts[name]["yaw_rate_violations"] += 1
         self.send({"type": "setpoint", "agent": name, "p": [msg.p.x, msg.p.y],
                    "v": [msg.v.x, msg.v.y], "yaw": msg.psi})
 

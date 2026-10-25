@@ -568,6 +568,11 @@ struct dynTrajCompiled
 
 struct parameters
 {
+  // Ground robot mode constrains the optimized path to forward motion and
+  // bounded yaw rate. The aerial planner leaves these disabled.
+  bool ground_robot = false;
+  double ground_max_yaw_rate = 0.8;
+  double ground_heading_cone_rad = 0.5;
   bool is_optimistic_dc;
   double delay_check;
 

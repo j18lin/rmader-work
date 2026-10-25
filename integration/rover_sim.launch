@@ -6,6 +6,9 @@
       <param name="visual/is_visual" value="false"/>
       <param name="is_replan_after_goal_reached" value="true"/>
       <param name="space_size" value="ground_space"/>
+      <param name="ground_robot/enabled" value="true"/>
+      <param name="ground_robot/max_yaw_rate" value="0.8"/>
+      <param name="ground_robot/heading_cone_rad" value="0.5"/>
       <rosparam param="ground_space">{x_min: -7.5, x_max: 7.5, y_min: -7.5, y_max: 7.5, z_min: -0.1, z_max: 0.1}</rosparam>
       <rosparam param="tuning_param/v_max">[0.55, 0.55, 0.01]</rosparam>
       <rosparam param="tuning_param/a_max">[0.5, 0.5, 0.01]</rosparam>
@@ -28,6 +31,9 @@
       <param name="visual/is_visual" value="false"/>
       <param name="is_replan_after_goal_reached" value="true"/>
       <param name="space_size" value="ground_space"/>
+      <param name="ground_robot/enabled" value="true"/>
+      <param name="ground_robot/max_yaw_rate" value="0.8"/>
+      <param name="ground_robot/heading_cone_rad" value="0.5"/>
       <rosparam param="ground_space">{x_min: -7.5, x_max: 7.5, y_min: -7.5, y_max: 7.5, z_min: -0.1, z_max: 0.1}</rosparam>
       <rosparam param="tuning_param/v_max">[0.55, 0.55, 0.01]</rosparam>
       <rosparam param="tuning_param/a_max">[0.5, 0.5, 0.01]</rosparam>

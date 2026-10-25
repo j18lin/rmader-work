@@ -91,6 +91,9 @@ SolverNlopt::SolverNlopt(ms::par_solver &par)
   dc_ = par.dc;
   v_max_ = par.v_max;
   a_max_ = par.a_max;
+  ground_robot_ = par.ground_robot;
+  ground_max_yaw_rate_ = par.ground_max_yaw_rate;
+  ground_heading_cone_rad_ = par.ground_heading_cone_rad;
   allow_infeasible_guess_ = par.allow_infeasible_guess;
   solver_ = getSolver(par.solver);                         // getSolver(nlopt::LD_VAR2);
   epsilon_tol_constraints_ = par.epsilon_tol_constraints;  // 1e-1;
@@ -1227,6 +1230,75 @@ bool SolverNlopt::checkGradientsUsingFiniteDiff()
   return (gradients_f_are_right && gradients_c_are_right);
 }
 
+void SolverNlopt::groundKinematics(const std::vector<Eigen::Vector3d> &q, int segment, double u,
+                                   Eigen::Vector3d &velocity, Eigen::Vector3d &acceleration,
+                                   Eigen::Vector4d &dv_dq, Eigen::Vector4d &da_dq) const
+{
+  Eigen::Vector4d first(3.0 * u * u, 2.0 * u, 1.0, 0.0);
+  Eigen::Vector4d second(6.0 * u, 2.0, 0.0, 0.0);
+  dv_dq = A_pos_bs_[segment] * first / deltaT_;
+  da_dq = A_pos_bs_[segment] * second / (deltaT_ * deltaT_);
+  velocity.setZero();
+  acceleration.setZero();
+  for (int k = 0; k < 4; ++k)
+  {
+    velocity += dv_dq[k] * q[segment + k];
+    acceleration += da_dq[k] * q[segment + k];
+  }
+}
+
+bool SolverNlopt::groundPathFeasible(const std::vector<Eigen::Vector3d> &q) const
+{
+  if (!ground_robot_)
+    return true;
+  constexpr double speed_floor2 = 0.0025;  // yaw is undefined near a stop
+  const double hx = std::cos(initial_state_.yaw);
+  const double hy = std::sin(initial_state_.yaw);
+  const double cone = std::tan(ground_heading_cone_rad_);
+  bool have_heading = false;
+  double previous_heading = 0.0;
+  double previous_time = 0.0;
+  for (int segment = 0; segment < num_of_segments_; ++segment)
+  {
+    for (int j = 1; j <= 19; ++j)
+    {
+      const double u = j / 20.0;
+      Eigen::Vector3d v, a;
+      Eigen::Vector4d dv, da;
+      groundKinematics(q, segment, u, v, a, dv, da);
+      const double cross = v.x() * a.y() - v.y() * a.x();
+      const double yaw_bound = ground_max_yaw_rate_ * (v.head<2>().squaredNorm() + speed_floor2);
+      if (std::abs(cross) > yaw_bound + 0.002)
+        return false;
+      // Curvature alone misses a 180-degree velocity flip through zero speed.
+      // Check that the tangent heading stays continuous along the whole path.
+      if (v.head<2>().norm() > 0.025)
+      {
+        const double heading = std::atan2(v.y(), v.x());
+        const double sample_time = (segment + u) * deltaT_;
+        if (have_heading)
+        {
+          const double change = std::atan2(std::sin(heading - previous_heading),
+                                           std::cos(heading - previous_heading));
+          if (std::abs(change) > ground_max_yaw_rate_ * (sample_time - previous_time) + 0.1)
+            return false;
+        }
+        previous_heading = heading;
+        previous_time = sample_time;
+        have_heading = true;
+      }
+      if (segment == 0)
+      {
+        const double forward = hx * v.x() + hy * v.y();
+        const double lateral = -hy * v.x() + hx * v.y();
+        if (forward < -0.01 || std::abs(lateral) > cone * forward + 0.01)
+          return false;
+      }
+    }
+  }
+  return true;
+}
+
 // m is the number of constraints, nn is the number of variables
 void SolverNlopt::computeConstraints(unsigned m, double *constraints, unsigned nn, double *grad,
                                      const std::vector<Eigen::Vector3d> &q, const std::vector<Eigen::Vector3d> &n,
@@ -1665,6 +1737,78 @@ void SolverNlopt::computeConstraints(unsigned m, double *constraints, unsigned n
     }
   }
 
+  if (ground_robot_)
+  {
+    constexpr double speed_floor2 = 0.0025;
+    // The planar spline must turn no faster than the rover. The derivative
+    // of each sampled constraint is written into NLopt's row-major Jacobian.
+    for (int segment = 0; segment < num_of_segments_; ++segment)
+    {
+      for (double u : {0.25, 0.5, 0.75})
+      {
+        Eigen::Vector3d v, a;
+        Eigen::Vector4d dv, da;
+        groundKinematics(q, segment, u, v, a, dv, da);
+        const double cross = v.x() * a.y() - v.y() * a.x();
+        const double speed2 = v.head<2>().squaredNorm();
+        for (double sign : {1.0, -1.0})
+        {
+          constraints[r] = sign * cross - ground_max_yaw_rate_ * (speed2 + speed_floor2);
+          if (grad)
+          {
+            for (int k = 0; k < 4; ++k)
+            {
+              int cp = segment + k;
+              if (cp >= N_ - 1)
+                cp = N_ - 2;  // terminal control points share one decision variable
+              if (!isADecisionCP(cp))
+                continue;
+              const int base = r * nn + gIndexQ(cp);
+              grad[base] += sign * (dv[k] * a.y() - v.y() * da[k])
+                            - 2.0 * ground_max_yaw_rate_ * v.x() * dv[k];
+              grad[base + 1] += sign * (v.x() * da[k] - dv[k] * a.x())
+                                - 2.0 * ground_max_yaw_rate_ * v.y() * dv[k];
+            }
+          }
+          ++r;
+        }
+      }
+    }
+    // At the first segment the velocity must lie in a forward cone around
+    // the actual rover heading, including when the rover starts from rest.
+    const double hx = std::cos(initial_state_.yaw);
+    const double hy = std::sin(initial_state_.yaw);
+    const double cone = std::tan(ground_heading_cone_rad_);
+    for (double u : {0.25, 0.5, 0.75})
+    {
+      Eigen::Vector3d v, a;
+      Eigen::Vector4d dv, da;
+      groundKinematics(q, 0, u, v, a, dv, da);
+      const double forward = hx * v.x() + hy * v.y();
+      const double lateral = -hy * v.x() + hx * v.y();
+      const double values[3] = {-forward, lateral - cone * forward, -lateral - cone * forward};
+      const double dx[3] = {-hx, -hy - cone * hx, hy - cone * hx};
+      const double dy[3] = {-hy, hx - cone * hy, -hx - cone * hy};
+      for (int j = 0; j < 3; ++j)
+      {
+        constraints[r] = values[j];
+        if (grad)
+        {
+          for (int k = 0; k < 4; ++k)
+          {
+            const int cp = k;
+            if (!isADecisionCP(cp))
+              continue;
+            const int base = r * nn + gIndexQ(cp);
+            grad[base] += dv[k] * dx[j];
+            grad[base + 1] += dv[k] * dy[j];
+          }
+        }
+        ++r;
+      }
+    }
+  }
+
   num_of_constraints_ = r;  // + 1 has already been added in the last loop of the previous for loop;
 }
 
@@ -2015,6 +2159,11 @@ bool SolverNlopt::optimize()
      reset
               << std::endl;*/
 
+  if (!groundPathFeasible(q))
+  {
+    ROS_WARN_STREAM("[NL] Rejecting a ground path that exceeds heading or yaw-rate limits");
+    return false;
+  }
   CPs2TrajAndPwp(q, traj_solution_, solution_, N_, p_, num_pol_, knots_, dc_);
   ///////////////
 

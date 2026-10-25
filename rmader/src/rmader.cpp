@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <algorithm>
+#include <stdexcept>
 #include <vector>
 #include <stdlib.h>
 
@@ -41,6 +42,10 @@ Rmader::Rmader(mt::parameters par) : par_(par)
   resetInitialization();
 
   ms::par_solver par_for_solver;
+
+  par_for_solver.ground_robot = par_.ground_robot;
+  par_for_solver.ground_max_yaw_rate = par_.ground_max_yaw_rate;
+  par_for_solver.ground_heading_cone_rad = par_.ground_heading_cone_rad;
 
   par_for_solver.x_min = par_.x_min;
   par_for_solver.x_max = par_.x_max;
@@ -97,6 +102,8 @@ Rmader::Rmader(mt::parameters par) : par_(par)
   A_rest_pos_basis_inverse_ = A_rest_pos_basis_.inverse();
 
 #if USE_GUROBI_FLAG
+  if (par_.ground_robot)
+    throw std::runtime_error("ground_robot constraints require the NLopt solver");
   solver_ = std::unique_ptr<SolverGurobi>(new SolverGurobi(par_for_solver));
 #else
   solver_ = std::unique_ptr<SolverNlopt>(new SolverNlopt(par_for_solver));
@@ -687,6 +694,13 @@ void Rmader::setTerminalGoal(mt::state& term_goal)
   G_term_.pos = term_goal.pos;
   Eigen::Vector3d temp = state_.pos;
   G_.pos = G_term_.pos;
+  if (par_.ground_robot)
+  {
+    // A rover can rotate while the old spline still predicts translation.
+    // Start a new goal from the next measured pose and heading instead of
+    // carrying the previous goal's tangent into the new optimization.
+    state_initialized_ = false;
+  }
   if (drone_status_ == DroneStatus::GOAL_REACHED)
   {
     // changeDroneStatus(DroneStatus::YAWING);
@@ -1400,6 +1414,13 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
   // }
 
   mt::state initial = A;
+  if (par_.ground_robot)
+  {
+    // A can be a future sample of the previously committed path. Its tangent
+    // is the heading that the new path must continue; at a stop use the rover.
+    initial.yaw = initial.vel.head<2>().norm() > 0.05
+                      ? std::atan2(initial.vel.y(), initial.vel.x()) : state_.yaw;
+  }
   if (is_movingAoutOfBbox_)
   {
     initial = movedA_;
@@ -1971,6 +1992,11 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
   // }
 
   mt::state initial = A;
+  if (par_.ground_robot)
+  {
+    initial.yaw = initial.vel.head<2>().norm() > 0.05
+                      ? std::atan2(initial.vel.y(), initial.vel.x()) : state_.yaw;
+  }
   mt::state final = G;
 
   mtx_G.lock();
@@ -2259,6 +2285,13 @@ void Rmader::yaw(double diff, mt::state& next_goal)
 
 void Rmader::getDesiredYaw(mt::state& next_goal)
 {
+  if (par_.ground_robot)
+  {
+    next_goal.yaw = next_goal.vel.head<2>().norm() > 0.05
+                        ? std::atan2(next_goal.vel.y(), next_goal.vel.x()) : state_.yaw;
+    next_goal.dyaw = 0.0;
+    return;
+  }
   if (par_.is_camera_yawing)
   {
     // looking at the center of highbay
