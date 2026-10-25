@@ -1,9 +1,61 @@
-# R-MADER two-agent test
+# R-MADER rover integration and two-agent tests
 
-This checkout contains the upstream ROS 1 aerial R-MADER planner. The test below
-builds its NLOPT path without a Gurobi license and drives two live planner nodes
-with bounded simulated state feedback. It is a planner timing and separation
-test; it does not exercise a UGV port or the ROS 2/Zenoh rover simulator.
+This checkout contains the upstream ROS 1 R-MADER planner, a planar ground
+configuration, a differential drive tracker, and a bridge to the ROS 2/Zenoh
+rover simulator. The original aerial timing test remains below.
+
+## Live rover simulation
+
+Build the NLOPT image and catkin volume using the commands under Run below.
+Clone the rover simulator as a sibling checkout and build its images as its own
+README describes. Then run:
+
+~~~bash
+integration/run_live.sh ../rover_sim_dev ./test-results
+~~~
+
+The runner starts JR81 and RR83 in Gazebo, arms their safety nodes, starts two
+R-MADER nodes in an isolated ROS 1 container, and connects them through a
+private TCP bridge. By default it feeds simulator truth state to R-MADER, so
+the test isolates planner and rover control integration from localization.
+Set RMADER_STATE_SOURCE=dlio to feed world-aligned DLIO state instead.
+After a 1.2 m forward drive, it tracks
+R-MADER's ground-plane position and velocity setpoints with bounded
+differential drive commands on each rover's cmd_vel_auto topic. It stops
+commanding on stale state, missing planner data, a disconnected bridge, or
+estimated center separation under 0.75 m. In DLIO mode, ground truth is
+used only for the initial drive and independent grading.
+
+The two rovers repeatedly visit opposite sides of the arena and return.
+The evaluator saves rmader_recording.json and rmader_grade.json. It checks
+two completed legs per rover, both agents' setpoints and committed
+trajectories, direct peer subscriptions, chassis separation and world
+contacts from Gazebo truth and URDF footprints, DLIO error, and real time
+factor. The simulator uses the rover safety nodes and records real DLIO as
+a diagnostic in truth mode. Its DLIO odometry gate is N/A in truth mode.
+The fallback mapping stack is omitted because this integration does not
+feed static obstacle geometry into R-MADER; the driven arena corridor is
+clear.
+
+The 180 s DLIO-controlled trial completed eight legs per rover and had
+0.924 m minimum chassis clearance, but JR81's DLIO estimate diverged after
+the eighth leg. A later 120 s DLIO-controlled trial triggered the bridge's
+motion consistency stop at 95 s. Those runs fail the odometry gate. Truth
+mode demonstrates the planner and differential drive connection while
+that localization issue remains.
+
+The 120 s truth-state run passed its applicable gates: five legs per rover,
+0.926 m minimum chassis clearance, no world box contact, peer subscriptions
+in both directions, and minimum real time factor 0.998. Its DLIO diagnostic
+still showed 9.108 m maximum JR81 error. The JSON reports retain the full
+time series and the N/A odometry gate.
+
+This is a ground rover adaptation of the aerial planner with a bounded
+unicycle tracker. Its trajectory optimizer remains holonomic in the XY
+plane, so successful simulator runs do not prove dynamic feasibility or
+collision safety on arbitrary terrain or hardware.
+
+## Aerial precursor
 
 ## Run
 
@@ -67,7 +119,6 @@ The NLOPT compatibility adapter reports only optimization success; it does not
 classify the three Gurobi-specific status flags. The live test checks observable
 motion and separation, but it does not establish every internal safety branch.
 
-This is an aerial planner test using a simplified tracker. It does not establish
-UGV motion safety, rover hardware readiness, or parity with the separate
-Mighty/ROS 2/Zenoh simulation. Those need the UGV-specific planner source and
-an integration test against the rover stack.
+This aerial precursor uses a simplified tracker and does not establish rover
+motion safety or hardware readiness. The live test above exercises the
+two-rover simulator with a ground tracker, with the stated limitations.

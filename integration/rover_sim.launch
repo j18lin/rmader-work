@@ -1,0 +1,46 @@
+<launch>
+  <group ns="SQ81s">
+    <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
+      <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
+      <rosparam param="agents_ids">[81, 83]</rosparam>
+      <param name="visual/is_visual" value="false"/>
+      <param name="is_replan_after_goal_reached" value="true"/>
+      <param name="space_size" value="ground_space"/>
+      <rosparam param="ground_space">{x_min: -7.5, x_max: 7.5, y_min: -7.5, y_max: 7.5, z_min: -0.1, z_max: 0.1}</rosparam>
+      <rosparam param="tuning_param/v_max">[0.55, 0.55, 0.01]</rosparam>
+      <rosparam param="tuning_param/a_max">[0.5, 0.5, 0.01]</rosparam>
+      <rosparam param="tuning_param/j_max">[1.0, 1.0, 0.02]</rosparam>
+      <rosparam param="tuning_param/drone_bbox">[0.7, 0.7, 0.4]</rosparam>
+      <param name="tuning_param/Ra" value="8.0"/>
+      <param name="tuning_param/delay_check_sec" value="0.05"/>
+      <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
+      <param name="opt/a_star_samp_z" value="1"/>
+      <param name="setting/goal_radius" value="0.4"/>
+      <remap from="~state" to="/SQ81s/state"/>
+      <remap from="~term_goal" to="/SQ81s/term_goal"/>
+      <remap from="~goal" to="/SQ81s/goal"/>
+    </node>
+  </group>
+  <group ns="SQ83s">
+    <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
+      <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
+      <rosparam param="agents_ids">[81, 83]</rosparam>
+      <param name="visual/is_visual" value="false"/>
+      <param name="is_replan_after_goal_reached" value="true"/>
+      <param name="space_size" value="ground_space"/>
+      <rosparam param="ground_space">{x_min: -7.5, x_max: 7.5, y_min: -7.5, y_max: 7.5, z_min: -0.1, z_max: 0.1}</rosparam>
+      <rosparam param="tuning_param/v_max">[0.55, 0.55, 0.01]</rosparam>
+      <rosparam param="tuning_param/a_max">[0.5, 0.5, 0.01]</rosparam>
+      <rosparam param="tuning_param/j_max">[1.0, 1.0, 0.02]</rosparam>
+      <rosparam param="tuning_param/drone_bbox">[0.7, 0.7, 0.4]</rosparam>
+      <param name="tuning_param/Ra" value="8.0"/>
+      <param name="tuning_param/delay_check_sec" value="0.05"/>
+      <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
+      <param name="opt/a_star_samp_z" value="1"/>
+      <param name="setting/goal_radius" value="0.4"/>
+      <remap from="~state" to="/SQ83s/state"/>
+      <remap from="~term_goal" to="/SQ83s/term_goal"/>
+      <remap from="~goal" to="/SQ83s/goal"/>
+    </node>
+  </group>
+</launch>
