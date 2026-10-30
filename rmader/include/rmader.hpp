@@ -147,6 +147,7 @@ private:
   int k_index_end_ = 0;
 
   double time_now_ = 0;
+  double last_ground_goal_seen_replan_time_ = 0.0;
 
   bool terminal_goal_initialized_ = false;
 

@@ -1221,12 +1221,26 @@ bool Rmader::isReplanningNeeded()
   }
 
   // Don't plan if drone is not traveling
+  // A ground rover can see its terminal goal in a long initial spline before a peer's
+  // trajectory arrives. Keep replanning until it actually reaches the goal so a later
+  // peer trajectory can change the committed path at a crossing.
   if (drone_status_ == DroneStatus::GOAL_REACHED || (drone_status_ == DroneStatus::YAWING) ||
-      (drone_status_ == DroneStatus::GOAL_SEEN))
+      (drone_status_ == DroneStatus::GOAL_SEEN && !par_.ground_robot))
   {
     // std::cout << "No replanning needed because" << std::endl;
     // printDroneStatus();
     return false;
+  }
+  if (par_.ground_robot && drone_status_ == DroneStatus::GOAL_SEEN)
+  {
+    // Four checks per second are enough to incorporate peer plans without flooding the
+    // ROS bridge and the localization stack with candidate trajectories.
+    double now = ros::Time::now().toSec();
+    if (now - last_ground_goal_seen_replan_time_ < 0.25)
+    {
+      return false;
+    }
+    last_ground_goal_seen_replan_time_ = now;
   }
   return true;
 }

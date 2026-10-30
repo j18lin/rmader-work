@@ -28,6 +28,31 @@ when planning begins. This is a watch run: opening the viewer can affect timing
 and localization, so use a separate run without the viewer for the graded
 performance result. The test still stops automatically at the chosen duration.
 
+To watch both rovers cross the arena centre in one shared world view, use the
+crossing scenario. JR81 starts west of the centre and heads east; RR83 starts
+south and heads north. Their direct routes intersect. Truth feedback isolates
+the planner and controller behaviour from intermittent JR81 DLIO faults:
+
+~~~bash
+RMADER_SCENARIO=crossing RMADER_VIZ=1 RMADER_STATE_SOURCE=truth \
+  RMADER_DURATION_S=100 \
+  integration/run_live.sh ../rover_sim_dev ./test-results/crossing
+~~~
+
+The overlay shows both rovers and their R-MADER paths together. A short
+committed trajectory away from the goal is marked `R-MADER HOLD`; in the
+verified crossing it represented yielding while the peer crossed. The grade and full
+recording are saved in the output directory. In the verified 100 s truth run,
+JR81 held before crossing at 40.97 s, RR83 crossed at 27.17 s, both reached
+three goals, and minimum chassis clearance was 1.358 m. These times are
+specific to that run. The close-range controller stop was not triggered;
+minimum centre distance was 1.76 m, above its 0.75 m threshold.
+
+This runner cycles fixed goals. Gazebo can contain cube models and the
+simulator's other planner supports manual RViz goals, but this R-MADER bridge
+does not yet accept manual goals or ingest static cube geometry. Adding a cube
+to the world alone will not make R-MADER plan around it.
+
 The runner starts JR81 and RR83 in Gazebo, arms their safety nodes, starts two
 R-MADER nodes in an isolated ROS 1 container, and connects them through a
 private TCP bridge. By default it feeds simulator truth state to R-MADER, so
