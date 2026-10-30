@@ -14,6 +14,20 @@ README describes. Then run:
 integration/run_live.sh ../rover_sim_dev ./test-results
 ~~~
 
+To watch R-MADER live in the 2D viewer, run:
+
+~~~bash
+RMADER_VIZ=1 RMADER_STATE_SOURCE=dlio RMADER_DURATION_S=120 \
+  integration/run_live.sh ../rover_sim_dev ./test-results/watch
+~~~
+
+The R-MADER layer shows each rover's cyan goal, amber candidate trajectory,
+green committed trajectory, yellow current setpoint, and the DLIO pose disc.
+The viewer starts before the R-MADER bridge so its subscriptions are present
+when planning begins. This is a watch run: opening the viewer can affect timing
+and localization, so use a separate run without the viewer for the graded
+performance result. The test still stops automatically at the chosen duration.
+
 The runner starts JR81 and RR83 in Gazebo, arms their safety nodes, starts two
 R-MADER nodes in an isolated ROS 1 container, and connects them through a
 private TCP bridge. By default it feeds simulator truth state to R-MADER, so

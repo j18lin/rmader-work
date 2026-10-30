@@ -10,6 +10,7 @@ import rospy
 from geometry_msgs.msg import PoseStamped
 from rmader_msgs.msg import DynTraj
 from snapstack_msgs.msg import Goal, State
+from trajectory_preview import sample_pwp
 
 NAMES = {"JR81": "SQ81s", "RR83": "SQ83s"}
 
@@ -61,7 +62,12 @@ class Bridge:
         self.counts[name]["trajs"] += 1
         if msg.is_committed:
             self.counts[name]["committed"] += 1
-        self.send({"type": "trajectory", "agent": name, "committed": bool(msg.is_committed)})
+        row = {"type": "trajectory", "agent": name, "committed": bool(msg.is_committed)}
+        try:
+            row["points"] = sample_pwp(msg.pwp)
+        except ValueError as exc:
+            rospy.logwarn("R-MADER preview unavailable for %s: %s", name, exc)
+        self.send(row)
 
     def heartbeat(self, _event):
         self.send({"type": "heartbeat", "counts": self.counts,

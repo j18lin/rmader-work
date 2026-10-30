@@ -27,6 +27,9 @@ cleanup() {
 trap cleanup EXIT
 cd "$sim_repo"
 python3 scripts/sim.py up rmader_smoke --stacks zenoh,gazebo,drive,frame_align,dlio
+if test "${RMADER_VIZ:-0}" = 1; then
+  python3 scripts/sim.py viz --layers rmader,pose
+fi
 docker run -d --name sim-rmader --network rover-sim \
   -v rmader_ugv_build:/ws -v "$rmader_repo:/ws/src/rmader_ugv:ro" \
   --entrypoint sleep rmader-ugv:noetic-build-deps infinity >/dev/null
