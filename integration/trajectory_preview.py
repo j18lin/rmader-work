@@ -6,8 +6,10 @@ def _value(coeff, u):
     return ((coeff.a*u + coeff.b)*u + coeff.c)*u + coeff.d
 
 
-def sample_pwp(pwp, max_points=80):
-    """Return world-frame [x, y] points from each normalized cubic interval."""
+def sample_pwp_timed(pwp, max_points=80):
+    """Return absolute-time [t, x, y] samples from each normalized cubic interval."""
+    if max_points < 2:
+        raise ValueError("at least two preview points are required")
     times = list(pwp.times)
     n = len(times) - 1
     if n < 1 or len(pwp.coeff_x) != n or len(pwp.coeff_y) != n:
@@ -28,13 +30,19 @@ def sample_pwp(pwp, max_points=80):
             x, y = _value(cx, u), _value(cy, u)
             if not math.isfinite(x) or not math.isfinite(y):
                 raise ValueError("non-finite PWP point")
-            points.append([round(x, 3), round(y, 3)])
+            points.append([round(times[i] + (times[i+1]-times[i])*u, 3),
+                           round(x, 3), round(y, 3)])
     x, y = _value(pwp.coeff_x[-1], 1.0), _value(pwp.coeff_y[-1], 1.0)
     if not math.isfinite(x) or not math.isfinite(y):
         raise ValueError("non-finite PWP endpoint")
-    points.append([round(x, 3), round(y, 3)])
+    points.append([round(times[-1], 3), round(x, 3), round(y, 3)])
     if len(points) > max_points:
         points = [points[round(i*(len(points)-1)/(max_points-1))]
                   for i in range(max_points)]
     return points
+
+
+def sample_pwp(pwp, max_points=80):
+    """Return world-frame [x, y] points for the live map viewer."""
+    return [row[1:] for row in sample_pwp_timed(pwp, max_points)]
 

@@ -10,7 +10,7 @@ import rospy
 from geometry_msgs.msg import PoseStamped
 from rmader_msgs.msg import DynTraj
 from snapstack_msgs.msg import Goal, State
-from trajectory_preview import sample_pwp
+from trajectory_preview import sample_pwp_timed
 
 NAMES = {"JR81": "SQ81s", "RR83": "SQ83s"}
 
@@ -62,9 +62,12 @@ class Bridge:
         self.counts[name]["trajs"] += 1
         if msg.is_committed:
             self.counts[name]["committed"] += 1
-        row = {"type": "trajectory", "agent": name, "committed": bool(msg.is_committed)}
+        row = {"type": "trajectory", "agent": name, "committed": bool(msg.is_committed),
+               "created_at": msg.time_created}
         try:
-            row["points"] = sample_pwp(msg.pwp)
+            timed = sample_pwp_timed(msg.pwp)
+            row["points"] = [p[1:] for p in timed]
+            row["point_times"] = [p[0] for p in timed]
         except ValueError as exc:
             rospy.logwarn("R-MADER preview unavailable for %s: %s", name, exc)
         self.send(row)
@@ -74,6 +77,24 @@ class Bridge:
                    "peer_subscribed": all(self.states[n].get_num_connections() > 0 for n in NAMES)})
 
     def receive(self, row):
+        if row.get("type") == "goal_batch":
+            goals = row.get("goals")
+            if not isinstance(goals, dict) or set(goals) != set(NAMES):
+                return
+            if any(not isinstance(goals[name], list) or len(goals[name]) != 2 or
+                   not all(isinstance(v, (float, int)) and math.isfinite(v) for v in goals[name])
+                   for name in NAMES):
+                return
+            stamp = rospy.Time.now()
+            for name in NAMES:
+                m = PoseStamped()
+                m.header.stamp = stamp
+                m.header.frame_id = "world"
+                m.pose.position.x, m.pose.position.y = goals[name]
+                m.pose.orientation.w = 1.0
+                self.goals[name].publish(m)
+            self.send({"type": "goal_batch_ack", "leg": row.get("leg"), "stamp": stamp.to_sec()})
+            return
         name = row.get("agent")
         if name not in NAMES:
             return

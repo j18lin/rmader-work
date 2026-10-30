@@ -39,14 +39,22 @@ RMADER_SCENARIO=crossing RMADER_VIZ=1 RMADER_STATE_SOURCE=truth \
   integration/run_live.sh ../rover_sim_dev ./test-results/crossing
 ~~~
 
-The overlay shows both rovers and their R-MADER paths together. A short
-committed trajectory away from the goal is marked `R-MADER HOLD`; in the
-verified crossing it represented yielding while the peer crossed. The grade and full
-recording are saved in the output directory. In the verified 100 s truth run,
-JR81 held before crossing at 40.97 s, RR83 crossed at 27.17 s, both reached
-three goals, and minimum chassis clearance was 1.358 m. These times are
-specific to that run. The close-range controller stop was not triggered;
-minimum centre distance was 1.76 m, above its 0.75 m threshold.
+The overlay shows both rovers and their R-MADER paths together. Each paired
+goal is sent through one ROS 1 batch with the same timestamp, after both
+rovers are ready. A short committed trajectory away from the goal is marked
+`R-MADER HOLD`. The output directory contains `rmader_recording.json`,
+`rmader_deconfliction.json`, and `rmader_grade.json`. The deconfliction report
+compares the two committed trajectories at matching future timestamps. Their
+geometric routes still cross; R-MADER can separate them in time by holding one
+rover.
+
+In a verified 100 s truth-feedback run, the first pair of committed plans
+were created 0.0012 s apart and predicted only 0.009 m centre separation at
+the intersection. RR83 committed a hold plan 0.27 s after the shared goal
+batch; that plan and JR81's concurrent plan predicted 1.757 m minimum centre
+separation. Both rovers completed two legs, the normal sim grade passed, and
+actual minimum chassis clearance was 1.29 m. The controller's 0.75 m peer
+stop was never used. Timing and which rover yields may vary in later runs.
 
 This runner cycles fixed goals. Gazebo can contain cube models and the
 simulator's other planner supports manual RViz goals, but this R-MADER bridge

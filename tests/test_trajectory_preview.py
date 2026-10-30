@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace as Obj
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "integration"))
-from trajectory_preview import sample_pwp
+from trajectory_preview import sample_pwp, sample_pwp_timed
 
 
 def coeff(a=0, b=0, c=0, d=0):
@@ -22,6 +22,11 @@ class PreviewTest(unittest.TestCase):
         self.assertIn([1.0, 0.0], points)
         self.assertEqual(points[-1], [2.0, 1.0])
         self.assertGreater(len(points), 4)
+        timed = sample_pwp_timed(pwp)
+        self.assertEqual(timed[0], [10.0, 0.0, 0.0])
+        self.assertEqual(timed[-1], [12.0, 2.0, 1.0])
+        self.assertEqual([row[1:] for row in timed], points)
+        self.assertTrue(all(b[0] > a[0] for a, b in zip(timed, timed[1:])))
 
     def test_bad_polynomial_is_not_visualized(self):
         for pwp in (

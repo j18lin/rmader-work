@@ -47,4 +47,8 @@ docker exec sim-drive bash -lc \
   "source /opt/ros/humble/setup.bash && source /home/swarm/code/rover_ws/install/setup.bash && python3 /rover_sim/scripts/rover_rmader_bridge.py --duration $duration --state-source $state_source --scenario $scenario --inject-jr81-dlio-jump-at $inject_jump_at"
 recording="/tmp/rover_sim-$(id -u)/run/rmader_recording.json"
 cp "$recording" "$out_dir/rmader_recording.json"
+if test "$scenario" = crossing; then
+  python3 scripts/analyze_rmader_crossing.py "$recording" \
+    --out "$out_dir/rmader_deconfliction.json"
+fi
 python3 scripts/grade_rmader.py "$recording" --out "$out_dir/rmader_grade.json"
