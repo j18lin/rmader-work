@@ -10,6 +10,7 @@
 #ifndef OCTOPUS_SEARCH_HPP
 #define OCTOPUS_SEARCH_HPP
 
+#include <functional>
 #include <vector>
 #include <Eigen/Dense>
 #include "rmader_types.hpp"
@@ -75,6 +76,10 @@ public:
   void setBasisUsedForCollision(int basis);
 
   void setBias(double bias);
+
+  // Optional soft cost (per metre of path) of having a control point at a position at a time. Used to bias
+  // the search away from observed dynamic obstacles; an empty function disables it.
+  void setHeatCost(std::function<double(const Eigen::Vector3d&, double)> heat_cost);
 
   bool run(std::vector<Eigen::Vector3d>& result, std::vector<Eigen::Vector3d>& n, std::vector<double>& d,
            bool& is_stuck, bool& is_q0_fail);
@@ -148,6 +153,8 @@ private:
                           std::vector<double>& d);
 
   // bias should be >=1.0
+  std::function<double(const Eigen::Vector3d&, double)> heat_cost_;
+
   double bias_;  // page 34 of https://www.cs.cmu.edu/~motionplanning/lecture/Asearch_v8.pdf
 
   int basis_ = B_SPLINE;

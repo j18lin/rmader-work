@@ -14,6 +14,7 @@
 #include "exprtk.hpp"
 #include "termcolor.hpp"
 #include <Eigen/Dense>
+#include "dyn_obstacles.hpp"
 
 namespace mt  // rmader_types
 {
@@ -543,16 +544,20 @@ struct dynTraj
 struct dynTrajCompiled
 {
   std::vector<exprtk::expression<double>> function;
-  Eigen::Vector3d bbox;
-  int id;
-  double time_received;  // time at which this trajectory was received from an agent
-  double time_created;   // for delay check
+  Eigen::Vector3d bbox = Eigen::Vector3d::Zero();
+  int id = 0;
+  double time_received = 0.0;  // time at which this trajectory was received from an agent
+  double time_created = 0.0;   // for delay check
   // double time_sent;      // to measure comm delay (not much different from time_created)
-  bool is_agent;  // true for a trajectory of an agent, false for an obstacle
-  bool is_static;
-  bool is_committed;
+  bool is_agent = false;  // true for a trajectory of an agent, false for an obstacle
+  bool is_static = false;
+  bool is_committed = false;
   mt::PieceWisePol pwp;
-  int traj_id;
+  int traj_id = 0;
+  // True for an obstacle that is only observed (see dyn_obstacles.hpp). Its occupancy comes from `track`
+  // and the time elapsed since it was observed; `function` and `pwp` are unused.
+  bool is_observed = false;
+  dynobs::Track track;
 };
 
 // struct mt::PieceWisePolWithInfo
@@ -654,6 +659,8 @@ struct parameters
   double gamma = 0.5;
 
   bool is_stuck = false;
+
+  dynobs::Params dyn;  // observation-based dynamic obstacles (dyn_obstacles/* in rmader.yaml)
 };
 
 typedef std::vector<mt::state> trajectory;

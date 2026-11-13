@@ -67,6 +67,10 @@ public:
   bool IsTranslating();
   void updateTrajObstacles_with_delaycheck(mt::dynTraj traj);
   void updateTrajObstacles(mt::dynTraj traj);
+  // Feeds one observation of an obstacle whose future motion is unknown (see dyn_obstacles.hpp).
+  void updateObservedObstacle(const dynobs::Observation& obs);
+  std::vector<dynobs::Track> getObservedTracks();
+  bool isEvading();
 
   Eigen::Vector2d RotationMatrix(Eigen::Vector2d& vec, const double& angle);
   void getID(int& id);
@@ -105,6 +109,18 @@ private:
                                  double t_end);
 
   void removeTrajsThatWillNotAffectMe(const mt::state& A, double t_start, double t_end);
+
+  // Observation-based dynamic obstacles. These expect mtx_trajs_ to be held by the caller...
+  mt::dynTrajCompiled compileObservedTrack(const dynobs::Track& track, double time_received);
+  Eigen::Vector3d centerOfObstacle(mt::dynTrajCompiled& traj, double t);
+  void pruneObservedObstacles(double now);
+  void setHeatCostForSolver();
+  // ...and these take it themselves.
+  bool hasObservedObstacles();
+
+  // Moves a stopped agent out of the way of an approaching observed obstacle, and back afterwards.
+  void updateHoverAvoidance();
+  void setTerminalGoalInternal(mt::state& term_goal);
 
   /*  vec_E<Polyhedron<3>> cu::vectorGCALPol2vectorJPSPol(ConvexHullsOfCurves& convex_hulls_of_curves);
     mt::ConvexHullsOfCurves_Std cu::vectorGCALPol2vectorStdEigen(ConvexHullsOfCurves& convexHulls);*/
@@ -250,6 +266,13 @@ private:
   Eigen::Matrix<double, 4, 4> A_rest_pos_basis_inverse_;
 
   separator::Separator* separator_solver_;
+
+  dynobs::Tracker obs_tracker_;  // guarded by mtx_trajs_
+  // Extra clearance around observed obstacles; non-zero only while building the hulls to plan against
+  // (guarded by mtx_trajs_). The checks that follow use the boxes as they are.
+  double observed_extra_margin_ = 0.0;
+  bool is_evading_ = false;      // true while the terminal goal is an evasion goal
+  mt::state hover_home_;         // terminal goal to return to after evading
 };
 
 #endif

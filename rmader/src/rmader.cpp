@@ -113,6 +113,8 @@ Rmader::Rmader(mt::parameters par) : par_(par)
   // solver_ = new SolverGurobi(par_for_solver);
 
   separator_solver_ = new separator::Separator();
+
+  obs_tracker_.setParams(par_.dyn);
 }
 
 void Rmader::dynTraj2dynTrajCompiled(const mt::dynTraj& traj, mt::dynTrajCompiled& traj_compiled)
@@ -140,6 +142,8 @@ void Rmader::dynTraj2dynTrajCompiled(const mt::dynTraj& traj, mt::dynTrajCompile
 
   traj_compiled.bbox = traj.bbox;
   traj_compiled.id = traj.id;
+  // Upstream never copied is_agent, so every later `traj.is_agent` test read an uninitialized bool.
+  traj_compiled.is_agent = traj.is_agent;
   traj_compiled.time_received = traj.time_received;  // ros::Time::now().toSec();
   traj_compiled.time_created = traj.time_created;
   traj_compiled.is_committed = traj.is_committed;
@@ -178,7 +182,9 @@ void Rmader::updateTrajObstacles_with_delaycheck(mt::dynTraj traj)
     // std::cout << "clean!" << std::endl;
 
     trajs_.erase(std::remove_if(trajs_.begin(), trajs_.end(),
-                                [&](mt::dynTrajCompiled const& traj) { return traj.id == traj_compiled.id; }),
+                                [&](mt::dynTrajCompiled const& traj) {
+                                  return traj.id == traj_compiled.id && !traj.is_observed;
+                                }),
                  trajs_.end());
 
     // std::cout << "traj_compiled.id is " << traj_compiled.id << std::endl;
@@ -201,14 +207,7 @@ void Rmader::updateTrajObstacles_with_delaycheck(mt::dynTraj traj)
 
   for (auto traj_compiled : trajs_)
   {
-    mtx_t_.lock();
-    t_ = ros::Time::now().toSec();
-
-    Eigen::Vector3d center_obs;
-    center_obs << traj_compiled.function[0].value(), traj_compiled.function[1].value(),
-        traj_compiled.function[2].value();
-
-    mtx_t_.unlock();
+    Eigen::Vector3d center_obs = centerOfObstacle(traj_compiled, ros::Time::now().toSec());
 
     if (((traj_compiled.is_static == true) && (center_obs - state_.pos).norm() > 2 * par_.Ra) ||  ////
         ((traj_compiled.is_static == false) && (center_obs - state_.pos).norm() > 4 * par_.Ra))
@@ -269,7 +268,9 @@ void Rmader::updateTrajObstacles(mt::dynTraj traj)
 
   std::vector<mt::dynTrajCompiled>::iterator obs_ptr =
       std::find_if(trajs_.begin(), trajs_.end(),
-                   [=](const mt::dynTrajCompiled& traj_compiled) { return traj_compiled.id == traj.id; });
+                   [=](const mt::dynTrajCompiled& traj_compiled) {
+                     return traj_compiled.id == traj.id && !traj_compiled.is_observed;
+                   });
 
   bool exists_in_local_map = (obs_ptr != std::end(trajs_));
 
@@ -292,14 +293,7 @@ void Rmader::updateTrajObstacles(mt::dynTraj traj)
 
   for (auto traj_compiled : trajs_)
   {
-    mtx_t_.lock();
-    t_ = ros::Time::now().toSec();
-
-    Eigen::Vector3d center_obs;
-    center_obs << traj_compiled.function[0].value(), traj_compiled.function[1].value(),
-        traj_compiled.function[2].value();
-
-    mtx_t_.unlock();
+    Eigen::Vector3d center_obs = centerOfObstacle(traj_compiled, ros::Time::now().toSec());
 
     if (((traj_compiled.is_static == true) && (center_obs - state_.pos).norm() > 2 * par_.Ra) ||  ////
         ((traj_compiled.is_static == false) && (center_obs - state_.pos).norm() > 4 * par_.Ra))
@@ -333,6 +327,189 @@ void Rmader::updateTrajObstacles(mt::dynTraj traj)
 
   have_received_trajectories_while_checking_ = false;
   // std::cout << bold << blue << "updateTrajObstacles took " << tmp_t << reset << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// Observation-based dynamic obstacles (see dyn_obstacles.hpp)
+// ---------------------------------------------------------------------------
+
+mt::dynTrajCompiled Rmader::compileObservedTrack(const dynobs::Track& track, double time_received)
+{
+  mt::dynTrajCompiled traj;
+  traj.bbox = track.bbox;
+  traj.id = track.id;
+  traj.time_received = time_received;
+  traj.time_created = track.stamp;
+  traj.is_agent = false;
+  traj.is_committed = true;
+  traj.traj_id = track.num_observations;
+  traj.is_observed = true;
+  traj.track = track;
+  // With only a speed bound to go by, a track that looks parked may start moving: it is never static.
+  traj.is_static = (par_.dyn.mode == dynobs::Mode::PREDICTED) && !track.is_dynamic;
+  return traj;
+}
+
+// Where the centre of an obstacle of the local map is (expected to be) at time t.
+Eigen::Vector3d Rmader::centerOfObstacle(mt::dynTrajCompiled& traj, double t)
+{
+  if (traj.is_observed)
+  {
+    return dynobs::centerBox(traj.track, t, t, par_.dyn).center();
+  }
+
+  mtx_t_.lock();
+  t_ = t;
+  Eigen::Vector3d center(traj.function[0].value(), traj.function[1].value(), traj.function[2].value());
+  mtx_t_.unlock();
+  return center;
+}
+
+void Rmader::updateObservedObstacle(const dynobs::Observation& obs)
+{
+  if (!par_.dyn.enabled)
+  {
+    return;
+  }
+
+  mtx_trajs_.lock();
+
+  if (obs_tracker_.update(obs))  // false for an out-of-order observation
+  {
+    dynobs::Track track;
+    obs_tracker_.get(obs.id, track);
+    mt::dynTrajCompiled traj_compiled = compileObservedTrack(track, ros::Time::now().toSec());
+
+    auto it = std::find_if(trajs_.begin(), trajs_.end(), [&](const mt::dynTrajCompiled& traj) {
+      return traj.is_observed && traj.id == traj_compiled.id;
+    });
+    if (it != trajs_.end())
+    {
+      *it = traj_compiled;
+    }
+    else
+    {
+      trajs_.push_back(traj_compiled);
+    }
+  }
+
+  mtx_trajs_.unlock();
+}
+
+std::vector<dynobs::Track> Rmader::getObservedTracks()
+{
+  mtx_trajs_.lock();
+  std::vector<dynobs::Track> tracks = obs_tracker_.tracks();
+  mtx_trajs_.unlock();
+  return tracks;
+}
+
+bool Rmader::hasObservedObstacles()
+{
+  mtx_trajs_.lock();
+  bool result = !obs_tracker_.tracks().empty();
+  mtx_trajs_.unlock();
+  return result;
+}
+
+bool Rmader::isEvading()
+{
+  return is_evading_;
+}
+
+// Forgets the obstacles that have not been observed for a while. A track that is still alive is put back in
+// the local map if an earlier replan dropped it for being out of reach: it may have come closer since.
+void Rmader::pruneObservedObstacles(double now)
+{
+  if (!par_.dyn.enabled)
+  {
+    return;
+  }
+
+  obs_tracker_.prune(now);
+
+  trajs_.erase(std::remove_if(trajs_.begin(), trajs_.end(),
+                              [&](const mt::dynTrajCompiled& traj) {
+                                dynobs::Track track;
+                                return traj.is_observed && !obs_tracker_.get(traj.id, track);
+                              }),
+               trajs_.end());
+
+  for (const dynobs::Track& track : obs_tracker_.tracks())
+  {
+    bool in_local_map = std::any_of(trajs_.begin(), trajs_.end(), [&](const mt::dynTrajCompiled& traj) {
+      return traj.is_observed && traj.id == track.id;
+    });
+    if (!in_local_map)
+    {
+      trajs_.push_back(compileObservedTrack(track, now));
+    }
+  }
+}
+
+// Biases the A* guess away from the observed obstacles and from where they are predicted to go.
+void Rmader::setHeatCostForSolver()
+{
+#if !USE_GUROBI_FLAG
+  const std::vector<dynobs::Track> tracks = obs_tracker_.tracks();
+  if (!par_.dyn.enabled || par_.dyn.heat_weight <= 0.0 || tracks.empty())
+  {
+    solver_->setHeatCost(nullptr);
+    return;
+  }
+  const dynobs::Params dyn = par_.dyn;
+  solver_->setHeatCost(
+      [tracks, dyn](const Eigen::Vector3d& p, double t) { return dyn.heat_weight * dynobs::heat(p, t, tracks, dyn); });
+#endif
+}
+
+// SANDO-style hover avoidance: an agent that is stopped at its goal gets out of the way of an observed
+// obstacle that is about to come too close, and returns to the goal once the goal is clear again.
+void Rmader::updateHoverAvoidance()
+{
+  if (!par_.dyn.enabled || !par_.dyn.hover_avoidance_enabled || initializedStateAndTermGoal() == false ||
+      drone_status_ != DroneStatus::GOAL_REACHED)
+  {
+    return;
+  }
+
+  const double now = ros::Time::now().toSec();
+  const std::vector<dynobs::Track> tracks = getObservedTracks();
+  const Eigen::Vector3d here = state_.pos;
+
+  mt::state target;
+  bool move = false;
+
+  if (dynobs::hoverEvasionGoal(here, now, tracks, par_.dyn, target.pos))
+  {
+    if (!is_evading_)
+    {
+      hover_home_ = G_term_;
+    }
+    target.pos.x() = std::min(std::max(target.pos.x(), par_.x_min), par_.x_max);
+    target.pos.y() = std::min(std::max(target.pos.y(), par_.y_min), par_.y_max);
+    target.pos.z() = std::min(std::max(target.pos.z(), par_.z_min), par_.z_max);
+    is_evading_ = true;
+    move = (target.pos - here).norm() > par_.goal_radius;
+    std::cout << bold << "Observed obstacle too close while stopped: evading to " << target.pos.transpose() << reset
+              << std::endl;
+  }
+  else if (is_evading_)
+  {
+    Eigen::Vector3d unused;
+    if (!dynobs::hoverEvasionGoal(hover_home_.pos, now, tracks, par_.dyn, unused))
+    {
+      target = hover_home_;
+      is_evading_ = false;
+      move = true;
+      std::cout << bold << "Goal is clear again: returning to " << target.pos.transpose() << reset << std::endl;
+    }
+  }
+
+  if (move)
+  {
+    setTerminalGoalInternal(target);
+  }
 }
 
 std::vector<Eigen::Vector3d> Rmader::vertexesOfInterval(mt::PieceWisePol& pwp, double t_start, double t_end,
@@ -411,6 +588,15 @@ std::vector<Eigen::Vector3d> Rmader::vertexesOfInterval(mt::dynTrajCompiled& tra
 {
   Eigen::Vector3d delta = Eigen::Vector3d::Zero();
   Eigen::Vector3d drone_boundarybox = par_.drone_bbox;
+
+  if (traj.is_observed)
+  {
+    // Everything the obstacle can occupy during the interval, grown by the time elapsed since it was last
+    // seen, plus the same clearance the broadcast obstacles get below.
+    Eigen::Vector3d clearance = drone_boundarybox / 2.0 +
+                                (par_.beta + par_.alpha + observed_extra_margin_) * Eigen::Vector3d::Ones();
+    return dynobs::occupancyBox(traj.track, t_start, t_end, par_.dyn, clearance).vertexes();
+  }
 
   if (traj.is_agent == false)
   {
@@ -583,7 +769,11 @@ void Rmader::removeTrajsThatWillNotAffectMe(const mt::state& A, double t_start, 
       t_ = t_start;  // which is constant along the trajectory
 
       Eigen::Vector3d center_obs;
-      if (traj.is_agent == false)
+      if (traj.is_observed)
+      {
+        center_obs = traj.track.pos;
+      }
+      else if (traj.is_agent == false)
       {
         center_obs << traj.function[0].value(), traj.function[1].value(), traj.function[2].value();
       }
@@ -685,6 +875,12 @@ ConvexHullsOfCurves Rmader::convexHullsOfCurves(double t_start, double t_end)
 }
 
 void Rmader::setTerminalGoal(mt::state& term_goal)
+{
+  is_evading_ = false;  // a goal from outside overrides any evasion in progress
+  setTerminalGoalInternal(term_goal);
+}
+
+void Rmader::setTerminalGoalInternal(mt::state& term_goal)
 {
   mtx_G_term.lock();
   mtx_G.lock();
@@ -998,7 +1194,8 @@ bool Rmader::safetyCheckAfterOptForRmader(mt::PieceWisePol pwp_optimized, bool& 
   bool result = true;
   for (auto& traj : trajs_)
   {
-    if (traj.is_agent == true)  // need to include the trajs that came in the last delay check
+    // need to include the trajs that came in the last delay check, and the obstacles observed meanwhile
+    if (traj.is_agent == true || traj.is_observed)
     {
       if (trajsAndPwpAreInCollision_with_inflation(traj, pwp_optimized, pwp_optimized.times.front(),
                                                    pwp_optimized.times.back(), is_q0_fail))
@@ -1021,7 +1218,7 @@ bool Rmader::safetyCheckAfterOpt(mt::PieceWisePol pwp_optimized)
   bool result = true;
   for (auto traj : trajs_)
   {
-    if (traj.time_received > time_init_opt_ && traj.is_agent == true)
+    if (traj.time_received > time_init_opt_ && (traj.is_agent == true || traj.is_observed))
     {
       if (trajsAndPwpAreInCollision(traj, pwp_optimized, pwp_optimized.times.front(), pwp_optimized.times.back()))
       {
@@ -1224,14 +1421,18 @@ bool Rmader::isReplanningNeeded()
   // A ground rover can see its terminal goal in a long initial spline before a peer's
   // trajectory arrives. Keep replanning until it actually reaches the goal so a later
   // peer trajectory can change the committed path at a crossing.
+  // Likewise, observed obstacles keep moving in ways the committed trajectory did not account for, so
+  // keep replanning (at the same throttled rate) while any of them is being tracked.
+  const bool replan_at_goal_seen = par_.ground_robot || (par_.dyn.enabled && hasObservedObstacles());
+
   if (drone_status_ == DroneStatus::GOAL_REACHED || (drone_status_ == DroneStatus::YAWING) ||
-      (drone_status_ == DroneStatus::GOAL_SEEN && !par_.ground_robot))
+      (drone_status_ == DroneStatus::GOAL_SEEN && !replan_at_goal_seen))
   {
     // std::cout << "No replanning needed because" << std::endl;
     // printDroneStatus();
     return false;
   }
-  if (par_.ground_robot && drone_status_ == DroneStatus::GOAL_SEEN)
+  if (replan_at_goal_seen && drone_status_ == DroneStatus::GOAL_SEEN)
   {
     // Four checks per second are enough to incorporate peer plans without flooding the
     // ROS bridge and the localization stack with candidate trajectories.
@@ -1273,6 +1474,8 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
                                     std::vector<Hyperplane3D>& planes, int& num_of_LPs_run, int& num_of_QCQPs_run,
                                     mt::PieceWisePol& pwp_now, double& headsup_time)
 {
+  updateHoverAvoidance();
+
   if (isReplanningNeeded() == false)
   {
     // std::cout << "replan is not needed" << std::endl;
@@ -1486,11 +1689,15 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
   // std::cout << "aft mtx_trajs_.lock() in replan" << std::endl;
 
   time_init_opt_ = ros::Time::now().toSec();
+  pruneObservedObstacles(time_init_opt_);
+  setHeatCostForSolver();
   removeTrajsThatWillNotAffectMe(A, t_start, t_final);
 
   // std::cout << "1.1" << std::endl;
 
+  observed_extra_margin_ = par_.dyn.planning_margin;
   ConvexHullsOfCurves hulls = convexHullsOfCurves(t_start, t_final);
+  observed_extra_margin_ = 0.0;
 
   // std::cout << "bef mtx_trajs_.unlock() in replan" << std::endl;
   mtx_trajs_.unlock();
@@ -1859,6 +2066,8 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
                     std::vector<Hyperplane3D>& planes, int& num_of_LPs_run, int& num_of_QCQPs_run,
                     mt::PieceWisePol& pwp_out)
 {
+  updateHoverAvoidance();
+
   if (isReplanningNeeded() == false)
   {
     return false;
@@ -2055,9 +2264,13 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
   mtx_trajs_.lock();
 
   time_init_opt_ = ros::Time::now().toSec();
+  pruneObservedObstacles(time_init_opt_);
+  setHeatCostForSolver();
   removeTrajsThatWillNotAffectMe(A, t_start, t_final);
 
+  observed_extra_margin_ = par_.dyn.planning_margin;
   ConvexHullsOfCurves hulls = convexHullsOfCurves(t_start, t_final);
+  observed_extra_margin_ = 0.0;
 
   mtx_trajs_.unlock();
 

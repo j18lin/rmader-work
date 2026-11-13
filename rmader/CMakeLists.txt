@@ -50,6 +50,13 @@ add_library(cgal_utils STATIC src/cgal_utils)
 target_include_directories (cgal_utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cgal_utils PUBLIC ${DECOMP_UTIL_LIBRARIES} ${catkin_LIBRARIES})
 
+# Observation-based dynamic obstacles (no ROS/CGAL/solver dependency).
+add_library(dyn_obstacles STATIC src/dyn_obstacles.cpp)
+set_target_properties(dyn_obstacles PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_executable(test_dyn_obstacles src/examples/test_dyn_obstacles.cpp)
+target_link_libraries(test_dyn_obstacles dyn_obstacles)
+
 add_library(utils STATIC src/utils.cpp)
 target_include_directories (utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(utils PUBLIC ${catkin_LIBRARIES})
@@ -97,7 +104,7 @@ endif()
 
 
 add_executable(${PROJECT_NAME}_node src/rmader_node.cpp src/rmader_ros.cpp src/rmader.cpp )
-target_link_libraries(${PROJECT_NAME}_node PUBLIC ${catkin_LIBRARIES}  solver utils)  #${CGAL_LIBS}
+target_link_libraries(${PROJECT_NAME}_node PUBLIC ${catkin_LIBRARIES}  solver utils dyn_obstacles)  #${CGAL_LIBS}
 add_dependencies(${PROJECT_NAME}_node ${catkin_EXPORTED_TARGETS} )
 
 add_executable(test_octopus_search src/examples/test_octopus_search.cpp src/octopus_search.cpp src/bspline_utils.cpp) 

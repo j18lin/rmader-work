@@ -37,6 +37,8 @@ public:
   bool setInitStateFinalStateInitTFinalT(mt::state initial_state, mt::state final_state, double t_init,
                                          double &t_final);
   void setHulls(mt::ConvexHullsOfCurves_Std &hulls);
+  // Soft cost for the A* initial guess, see OctopusSearch::setHeatCost. Empty function = none.
+  void setHeatCost(std::function<double(const Eigen::Vector3d &, double)> heat_cost);
 
   mt::trajectory traj_solution_;
 

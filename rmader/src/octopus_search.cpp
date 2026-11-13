@@ -285,6 +285,11 @@ void OctopusSearch::setBias(double bias)
   bias_ = bias;
 }
 
+void OctopusSearch::setHeatCost(std::function<double(const Eigen::Vector3d&, double)> heat_cost)
+{
+  heat_cost_ = heat_cost;
+}
+
 void OctopusSearch::setGoal(Eigen::Vector3d& goal)
 {
   goal_ = goal;
@@ -993,7 +998,15 @@ void OctopusSearch::expandAndAddToQueue(Node& current, double constraint_xL, dou
       continue;
     }
 
-    neighbor.g = current.g + weightEdge(current, neighbor);
+    double edge_cost = weightEdge(current, neighbor);
+    if (heat_cost_)
+    {
+      // Greville abscissa: the time at which the spline is closest to this control point.
+      int j = neighbor.index;
+      double t_cp = (knots_(j + 1) + knots_(j + 2) + knots_(j + 3)) / 3.0;
+      edge_cost += edge_cost * heat_cost_(neighbor.qi, t_cp);
+    }
+    neighbor.g = current.g + edge_cost;
     neighbor.h = h(neighbor);
 
     // std::cout << green << neighbor.qi.transpose() << " cost=" << neighbor.g + bias_ * neighbor.h << reset <<

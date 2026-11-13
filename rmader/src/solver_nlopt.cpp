@@ -462,6 +462,11 @@ void SolverNlopt::toGradSameConstraintDiffVariables(int var_gindex, const Eigen:
   grad[r * nn + var_gindex + 2] = tmp(2);
 }
 
+void SolverNlopt::setHeatCost(std::function<double(const Eigen::Vector3d &, double)> heat_cost)
+{
+  octopusSolver_->setHeatCost(heat_cost);
+}
+
 void SolverNlopt::setHulls(mt::ConvexHullsOfCurves_Std &hulls)
 
 {

@@ -103,6 +103,42 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
     throw std::invalid_argument("ground_robot limits");
   }
 
+  // Observation-based dynamic obstacles. Optional so that parameter files written before this existed
+  // keep working; everything defaults to upstream behaviour (disabled).
+  std::string dyn_mode;
+  nh1_.param("dyn_obstacles/enabled", par_.dyn.enabled, false);
+  nh1_.param<std::string>("dyn_obstacles/mode", dyn_mode, "predicted");
+  nh1_.param("dyn_obstacles/obst_max_vel", par_.dyn.obst_max_vel, par_.dyn.obst_max_vel);
+  nh1_.param("dyn_obstacles/obst_position_error", par_.dyn.obst_position_error, par_.dyn.obst_position_error);
+  nh1_.param("dyn_obstacles/base_inflation", par_.dyn.base_inflation, par_.dyn.base_inflation);
+  nh1_.param("dyn_obstacles/prediction_horizon", par_.dyn.prediction_horizon, par_.dyn.prediction_horizon);
+  nh1_.param("dyn_obstacles/prediction_growth", par_.dyn.prediction_growth, par_.dyn.prediction_growth);
+  nh1_.param("dyn_obstacles/velocity_window", par_.dyn.velocity_window, par_.dyn.velocity_window);
+  nh1_.param("dyn_obstacles/planning_margin", par_.dyn.planning_margin, par_.dyn.planning_margin);
+  nh1_.param("dyn_obstacles/velocity_filter_alpha", par_.dyn.velocity_filter_alpha, par_.dyn.velocity_filter_alpha);
+  nh1_.param("dyn_obstacles/velocity_threshold", par_.dyn.velocity_threshold, par_.dyn.velocity_threshold);
+  nh1_.param("dyn_obstacles/track_timeout", par_.dyn.track_timeout, par_.dyn.track_timeout);
+  nh1_.param("dyn_obstacles/heat/weight", par_.dyn.heat_weight, par_.dyn.heat_weight);
+  nh1_.param("dyn_obstacles/heat/alpha_reach", par_.dyn.heat_alpha_reach, par_.dyn.heat_alpha_reach);
+  nh1_.param("dyn_obstacles/heat/alpha_tube", par_.dyn.heat_alpha_tube, par_.dyn.heat_alpha_tube);
+  nh1_.param("dyn_obstacles/heat/tube_radius", par_.dyn.heat_tube_radius, par_.dyn.heat_tube_radius);
+  nh1_.param("dyn_obstacles/heat/power", par_.dyn.heat_power, par_.dyn.heat_power);
+  nh1_.param("dyn_obstacles/heat/max", par_.dyn.heat_max, par_.dyn.heat_max);
+  nh1_.param("dyn_obstacles/hover_avoidance/enabled", par_.dyn.hover_avoidance_enabled, false);
+  nh1_.param("dyn_obstacles/hover_avoidance/trigger_dist", par_.dyn.hover_trigger_dist, par_.dyn.hover_trigger_dist);
+  nh1_.param("dyn_obstacles/hover_avoidance/evasion_dist", par_.dyn.hover_evasion_dist, par_.dyn.hover_evasion_dist);
+  nh1_.param("dyn_obstacles/hover_avoidance/is_2d", par_.dyn.hover_avoidance_2d, par_.dyn.hover_avoidance_2d);
+  if (!dynobs::modeFromString(dyn_mode, par_.dyn.mode) || par_.dyn.obst_max_vel < 0.0 ||
+      par_.dyn.obst_position_error < 0.0 || par_.dyn.base_inflation < 0.0 || par_.dyn.prediction_horizon < 0.0 ||
+      par_.dyn.prediction_growth < 0.0 || par_.dyn.velocity_filter_alpha <= 0.0 ||
+      par_.dyn.velocity_filter_alpha > 1.0 || par_.dyn.track_timeout <= 0.0 || par_.dyn.heat_weight < 0.0 ||
+      par_.dyn.velocity_window < 0.0 || par_.dyn.planning_margin < 0.0 ||
+      par_.dyn.hover_evasion_dist <= 0.0)
+  {
+    ROS_FATAL("Invalid dyn_obstacles parameters (mode must be \"predicted\" or \"worst_case\")");
+    throw std::invalid_argument("dyn_obstacles parameters");
+  }
+
   // since drone_bbox is a vector, you need a workaround like this
   std::vector<double> drone_bbox_tmp;
   mu::safeGetParam(nh1_, "tuning_param/drone_bbox", drone_bbox_tmp);
@@ -229,6 +265,12 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   // sub_mode_ = nh1_.subscribe("mode", 1, &RmaderRos::modeCB, this);
   sub_whoplans_ = nh1_.subscribe("who_plans", 1, &RmaderRos::whoPlansCB, this);
   sub_state_ = nh1_.subscribe("state", 1, &RmaderRos::stateCB, this);
+
+  // Obstacles that are only observed (no trajectory of their own to broadcast)
+  if (par_.dyn.enabled)
+  {
+    sub_obstacle_obs_ = nh4_.subscribe("/obstacle_observations", 50, &RmaderRos::obstacleObservationCB, this);
+  }
 
   // Subscribers for trajs
 
@@ -416,6 +458,37 @@ void RmaderRos::trajCB(const rmader_msgs::DynTraj& msg)
   }
 }
 
+void RmaderRos::obstacleObservationCB(const rmader_msgs::ObstacleObservation& msg)
+{
+  dynobs::Observation obs;
+  obs.id = msg.id;
+  obs.stamp = msg.header.stamp.toSec();
+  obs.pos << msg.pos.x, msg.pos.y, msg.pos.z;
+  obs.vel << msg.vel.x, msg.vel.y, msg.vel.z;
+  obs.has_vel = msg.has_vel;
+  obs.bbox << msg.bbox.x, msg.bbox.y, msg.bbox.z;
+
+  if (obs.stamp <= 0.0)
+  {
+    obs.stamp = ros::Time::now().toSec();  // unstamped source: best we can do is the time of arrival
+  }
+
+  if (!obs.pos.allFinite() || !obs.vel.allFinite() || !obs.bbox.allFinite() || (obs.bbox.array() < 0.0).any())
+  {
+    ROS_WARN_THROTTLE(1.0, "Ignoring malformed observation of obstacle %d", obs.id);
+    return;
+  }
+
+  // Same reach as the broadcast trajectories, see the explanation of 4*Ra in Rmader::updateTrajObstacles
+  // (not applied until our own position is known).
+  if (published_initial_position_ && (state_.pos - obs.pos).norm() > 4 * par_.Ra)
+  {
+    return;
+  }
+
+  rmader_ptr_->updateObservedObstacle(obs);
+}
+
 void RmaderRos::allTrajsTimerCB(const ros::TimerEvent& e)
 {
   mt::dynTraj tmp = alltrajs_[0];
@@ -564,8 +637,8 @@ void RmaderRos::replanCB(const ros::TimerEvent& e)
     //   is_replanCB_called_ = true;
     // }
 
-    // Check if reached the goal
-    if (!is_replan_after_goal_reached_)
+    // Check if reached the goal. Hover avoidance needs the planner to stay alive at the goal.
+    if (!is_replan_after_goal_reached_ && !(par_.dyn.enabled && par_.dyn.hover_avoidance_enabled))
     {
       if (rmader_ptr_->isGoalSeen())
       {

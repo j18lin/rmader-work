@@ -58,6 +58,7 @@ add_message_files(
   GoalReached.msg
   MissedMsgsCnt.msg
   Trajs.msg
+  ObstacleObservation.msg
 )
 
 ## Generate services in the 'srv' folder

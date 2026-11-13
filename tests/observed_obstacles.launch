@@ -1,0 +1,37 @@
+<launch>
+  <!-- One planner among obstacles it only knows from /obstacle_observations.
+       Driven by tests/observed_obstacles_test.py. -->
+  <arg name="dyn_enabled" default="true"/>
+  <arg name="dyn_mode" default="predicted"/>
+  <arg name="hover_avoidance" default="false"/>
+  <arg name="heat_weight" default="2.0"/>
+
+  <group ns="SQ01s">
+    <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
+      <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
+      <rosparam param="agents_ids">[1]</rosparam>
+      <param name="visual/is_visual" value="false"/>
+      <param name="is_replan_after_goal_reached" value="true"/>
+      <rosparam param="tuning_param/v_max">[2.0, 2.0, 2.0]</rosparam>
+      <rosparam param="tuning_param/a_max">[4.0, 4.0, 4.0]</rosparam>
+      <rosparam param="tuning_param/j_max">[8.0, 8.0, 8.0]</rosparam>
+      <rosparam param="tuning_param/drone_bbox">[0.35, 0.35, 0.35]</rosparam>
+      <param name="tuning_param/Ra" value="6.0"/>
+      <param name="tuning_param/delay_check_sec" value="0.05"/>
+      <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
+
+      <param name="dyn_obstacles/enabled" value="$(arg dyn_enabled)"/>
+      <param name="dyn_obstacles/mode" value="$(arg dyn_mode)"/>
+      <param name="dyn_obstacles/obst_max_vel" value="0.5"/>
+      <param name="dyn_obstacles/obst_position_error" value="0.03"/>
+      <param name="dyn_obstacles/heat/weight" value="$(arg heat_weight)"/>
+      <param name="dyn_obstacles/hover_avoidance/enabled" value="$(arg hover_avoidance)"/>
+      <param name="dyn_obstacles/hover_avoidance/trigger_dist" value="1.5"/>
+      <param name="dyn_obstacles/hover_avoidance/evasion_dist" value="2.5"/>
+
+      <remap from="~state" to="/SQ01s/state"/>
+      <remap from="~term_goal" to="/SQ01s/term_goal"/>
+      <remap from="~goal" to="/SQ01s/goal"/>
+    </node>
+  </group>
+</launch>
