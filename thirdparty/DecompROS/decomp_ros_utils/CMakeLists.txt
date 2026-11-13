@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(decomp_ros_utils)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Wno-deprecated-declarations")
+# C++17: Boost >= 1.86 headers pulled in by rviz no longer accept C++11.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -Wall -Wno-deprecated-declarations")
 find_package(catkin REQUIRED COMPONENTS rviz roscpp)
 find_package(catkin_simple REQUIRED)
 find_package(cmake_modules)
