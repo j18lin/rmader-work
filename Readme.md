@@ -131,6 +131,6 @@ See [UGV_NOTES.md](UGV_NOTES.md) for the Docker build, closed-loop timing test, 
 ## Observed dynamic obstacles
 
 This checkout can also avoid obstacles that are only observed, with no trajectory of their own to broadcast
-(SANDO-style, off by default). See "Observed dynamic obstacles" in [UGV_NOTES.md](UGV_NOTES.md)
+(after SANDO, arXiv:2604.07599; off by default). See "Observed dynamic obstacles" in [UGV_NOTES.md](UGV_NOTES.md)
 and [cloud/README.md](cloud/README.md)
 for building and testing without Docker.

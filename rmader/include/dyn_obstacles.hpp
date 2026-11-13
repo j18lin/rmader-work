@@ -3,18 +3,19 @@
  *
  * Upstream R-MADER only avoids obstacles that broadcast their own future
  * trajectory (a closed-form expression of time, see DynTraj.msg). This module
- * adds the SANDO-style alternative for obstacles that are merely *observed*
- * (position, optionally velocity, at some timestamp) and whose future motion
- * is unknown apart from a speed bound:
+ * adds obstacles that are merely *observed* (position, optionally velocity, at
+ * some timestamp) and whose future motion is unknown apart from a speed bound,
+ * following SANDO (Kondo, Tordesillas, How, arXiv:2604.07599):
  *
  *  - a tracker that keeps one filtered track per observed obstacle and drops
- *    tracks that are no longer seen,
- *  - time-varying occupancy boxes: for a time interval [t_a, t_b] the box
- *    bounds everywhere the obstacle can be, growing with the time elapsed
- *    since the last observation,
- *  - a "heat" cost used to bias the A* initial guess away from obstacles and
- *    from the path they are predicted to take,
- *  - an evasion goal for an agent that is stopped while an obstacle closes in.
+ *    tracks that are no longer seen (the paper's Section VII uses an adaptive
+ *    EKF on point-cloud clusters; here observations arrive ready-made),
+ *  - per-interval reachable boxes, the paper's Section IV-B: for a time
+ *    interval ending at t_b the obstacle's box is grown on every side by
+ *    r = v_max * (t_b - t_observed) + epsilon,
+ *  - the dynamic-obstacle heat map of Section V-B, used to bias the A* guess,
+ *  - an evasion goal for an agent that is stopped while an obstacle closes in
+ *    (in SANDO's released configuration, not in the paper).
  *
  * Nothing here depends on ROS, CGAL or the solvers, so it can be unit tested
  * on its own (see src/examples/test_dyn_obstacles.cpp).
@@ -33,14 +34,16 @@ namespace dynobs
 {
 enum class Mode
 {
-  // Only the speed bound is trusted. The box for [t_a, t_b] is centred on the
-  // last observed position and grows by obst_max_vel * (t_b - t_observed).
-  // If the bound holds, the obstacle cannot leave the box.
-  WORST_CASE = 0,
-  // The centre follows a constant-velocity prediction for prediction_horizon
-  // seconds and the box grows at the slower prediction_growth rate. Tighter
-  // and less conservative, but only as good as the prediction. The result is
-  // always clipped to the WORST_CASE box, which it can never exceed.
+  // SANDO's inflation (Section IV-B, Eq. 11). Only the speed bound is trusted: the box for [t_a, t_b] is
+  // centred on the last observed position and grown by obst_max_vel * (t_b - t_observed) on every side.
+  // If every component of the obstacle's velocity stays within the bound (Assumption 1), the obstacle
+  // cannot leave the box. The paper measures the time from the planning instant; measuring it from the
+  // observation also covers the age of the observation.
+  REACHABLE = 0,
+  // Not in the paper, which names it as future work ("inflating around the predicted future position").
+  // The centre follows a constant-velocity prediction for prediction_horizon seconds and the box grows at
+  // the slower prediction_growth rate. Tighter, but only as good as the prediction: no guarantee. The
+  // result is clipped to the REACHABLE box, which it can never exceed.
   PREDICTED = 1
 };
 
@@ -49,11 +52,11 @@ bool modeFromString(const std::string& name, Mode& mode);
 struct Params
 {
   bool enabled = false;
-  Mode mode = Mode::PREDICTED;
+  Mode mode = Mode::REACHABLE;
 
-  double obst_max_vel = 0.5;         // [m/s] speed bound assumed for every observed obstacle
-  double obst_position_error = 0.05; // [m] bound on the error of an observed position
-  double base_inflation = 0.1;       // [m] constant extra margin around every observed obstacle
+  double obst_max_vel = 0.5;         // [m/s] v_max^obs: bound on each component of an obstacle's velocity
+  double obst_position_error = 0.05; // [m] epsilon: bound on the per-axis error of an observed position
+  double base_inflation = 0.1;       // [m] r_margin: constant extra margin around every observed obstacle
   double prediction_horizon = 1.0;   // [s] PREDICTED: how long the constant-velocity prediction is extrapolated
   double prediction_growth = 0.2;    // [m/s] PREDICTED: growth rate of the box along the prediction
 
@@ -68,13 +71,17 @@ struct Params
   // trajectory planned flush against them would fail the checks that follow (delay check, next replan).
   double planning_margin = 0.15;  // [m]
 
-  // Heat cost for the A* guess (0 disables it).
-  double heat_weight = 0.0;        // cost added per metre of path = heat_weight * heat
-  double heat_alpha_reach = 0.2;   // weight of the reachability blob around the obstacle
-  double heat_alpha_tube = 1.0;    // weight of the tube around the predicted path
-  double heat_tube_radius = 0.5;   // [m] radius of that tube
-  double heat_power = 2.0;         // falloff exponent of both terms
-  double heat_max = 2.0;           // saturation of the summed heat
+  // Dynamic-obstacle heat map for the A* guess (paper Section V-B/V-D, values from its Tables II and III).
+  // Soft only: it shapes the guess and has no part in the safety argument.
+  double heat_weight = 5.0;        // w_heat: edge cost = length + w_heat * H(q). 0 disables the heat map
+  double heat_alpha_base = 1.0;    // alpha_0^d: scale of the heat around the current position
+  double heat_alpha_tube = 2.0;    // alpha_1^d: scale of the tube around the predicted path
+  double heat_power_base = 2.0;    // p^d
+  double heat_power_tube = 2.0;    // q^d
+  double heat_tube_growth = -1.0;  // gamma_k [m/s], growth of the tube radius. Negative: the speed bound
+  double heat_tau_ratio = 0.5;     // tau_ratio^d: time weight exp(-t / (tau_ratio * prediction_horizon))
+  int heat_num_samples = 15;       // M_tube: samples of the predicted path
+  double heat_max = 50.0;          // H_max
 
   // Evasion while stopped at the goal.
   bool hover_avoidance_enabled = false;
@@ -172,8 +179,9 @@ private:
   std::vector<Track> tracks_;
 };
 
-// Dimensionless cost in [0, heat_max] of being at p at time t.
-double heat(const Eigen::Vector3d& p, double t, const std::vector<Track>& tracks, const Params& par);
+// Dynamic-obstacle heat H^d(q) of the paper's Section V-B, capped at heat_max: per obstacle a base term
+// around its current position plus a time-weighted tube around its predicted path, maximum over obstacles.
+double heat(const Eigen::Vector3d& q, const std::vector<Track>& tracks, const Params& par);
 
 // True if an agent stopped at `pos` should move away. `goal` is then where to go.
 bool hoverEvasionGoal(const Eigen::Vector3d& pos, double now, const std::vector<Track>& tracks, const Params& par,

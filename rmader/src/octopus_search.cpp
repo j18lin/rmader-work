@@ -1004,7 +1004,7 @@ void OctopusSearch::expandAndAddToQueue(Node& current, double constraint_xL, dou
       // Greville abscissa: the time at which the spline is closest to this control point.
       int j = neighbor.index;
       double t_cp = (knots_(j + 1) + knots_(j + 2) + knots_(j + 3)) / 3.0;
-      edge_cost += edge_cost * heat_cost_(neighbor.qi, t_cp);
+      edge_cost += heat_cost_(neighbor.qi, t_cp);  // c = d + w_heat * H(q), as in SANDO's A*
     }
     neighbor.g = current.g + edge_cost;
     neighbor.h = h(neighbor);

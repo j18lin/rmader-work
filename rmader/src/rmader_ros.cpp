@@ -107,7 +107,7 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   // keep working; everything defaults to upstream behaviour (disabled).
   std::string dyn_mode;
   nh1_.param("dyn_obstacles/enabled", par_.dyn.enabled, false);
-  nh1_.param<std::string>("dyn_obstacles/mode", dyn_mode, "predicted");
+  nh1_.param<std::string>("dyn_obstacles/mode", dyn_mode, "reachable");
   nh1_.param("dyn_obstacles/obst_max_vel", par_.dyn.obst_max_vel, par_.dyn.obst_max_vel);
   nh1_.param("dyn_obstacles/obst_position_error", par_.dyn.obst_position_error, par_.dyn.obst_position_error);
   nh1_.param("dyn_obstacles/base_inflation", par_.dyn.base_inflation, par_.dyn.base_inflation);
@@ -119,10 +119,13 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   nh1_.param("dyn_obstacles/velocity_threshold", par_.dyn.velocity_threshold, par_.dyn.velocity_threshold);
   nh1_.param("dyn_obstacles/track_timeout", par_.dyn.track_timeout, par_.dyn.track_timeout);
   nh1_.param("dyn_obstacles/heat/weight", par_.dyn.heat_weight, par_.dyn.heat_weight);
-  nh1_.param("dyn_obstacles/heat/alpha_reach", par_.dyn.heat_alpha_reach, par_.dyn.heat_alpha_reach);
+  nh1_.param("dyn_obstacles/heat/alpha_base", par_.dyn.heat_alpha_base, par_.dyn.heat_alpha_base);
   nh1_.param("dyn_obstacles/heat/alpha_tube", par_.dyn.heat_alpha_tube, par_.dyn.heat_alpha_tube);
-  nh1_.param("dyn_obstacles/heat/tube_radius", par_.dyn.heat_tube_radius, par_.dyn.heat_tube_radius);
-  nh1_.param("dyn_obstacles/heat/power", par_.dyn.heat_power, par_.dyn.heat_power);
+  nh1_.param("dyn_obstacles/heat/power_base", par_.dyn.heat_power_base, par_.dyn.heat_power_base);
+  nh1_.param("dyn_obstacles/heat/power_tube", par_.dyn.heat_power_tube, par_.dyn.heat_power_tube);
+  nh1_.param("dyn_obstacles/heat/tube_growth", par_.dyn.heat_tube_growth, par_.dyn.heat_tube_growth);
+  nh1_.param("dyn_obstacles/heat/tau_ratio", par_.dyn.heat_tau_ratio, par_.dyn.heat_tau_ratio);
+  nh1_.param("dyn_obstacles/heat/num_samples", par_.dyn.heat_num_samples, par_.dyn.heat_num_samples);
   nh1_.param("dyn_obstacles/heat/max", par_.dyn.heat_max, par_.dyn.heat_max);
   nh1_.param("dyn_obstacles/hover_avoidance/enabled", par_.dyn.hover_avoidance_enabled, false);
   nh1_.param("dyn_obstacles/hover_avoidance/trigger_dist", par_.dyn.hover_trigger_dist, par_.dyn.hover_trigger_dist);
@@ -131,11 +134,12 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   if (!dynobs::modeFromString(dyn_mode, par_.dyn.mode) || par_.dyn.obst_max_vel < 0.0 ||
       par_.dyn.obst_position_error < 0.0 || par_.dyn.base_inflation < 0.0 || par_.dyn.prediction_horizon < 0.0 ||
       par_.dyn.prediction_growth < 0.0 || par_.dyn.velocity_filter_alpha <= 0.0 ||
-      par_.dyn.velocity_filter_alpha > 1.0 || par_.dyn.track_timeout <= 0.0 || par_.dyn.heat_weight < 0.0 ||
+      par_.dyn.velocity_filter_alpha > 1.0 || par_.dyn.track_timeout <= 0.0 || par_.dyn.heat_weight < 0.0 || par_.dyn.heat_tau_ratio < 0.0 ||
+      par_.dyn.heat_num_samples < 1 || par_.dyn.heat_max < 0.0 ||
       par_.dyn.velocity_window < 0.0 || par_.dyn.planning_margin < 0.0 ||
       par_.dyn.hover_evasion_dist <= 0.0)
   {
-    ROS_FATAL("Invalid dyn_obstacles parameters (mode must be \"predicted\" or \"worst_case\")");
+    ROS_FATAL("Invalid dyn_obstacles parameters (mode must be \"reachable\" or \"predicted\")");
     throw std::invalid_argument("dyn_obstacles parameters");
   }
 

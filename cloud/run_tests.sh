@@ -35,8 +35,8 @@ run unit_python python3 -m pytest -q tests
 
 obs=tests/observed_obstacles.launch
 drv=tests/observed_obstacles_test.py
+closed_loop crossing_reachable "$obs" "dyn_mode:=reachable" "$drv" --scenario crossing --duration 60
 closed_loop crossing_predicted "$obs" "dyn_mode:=predicted" "$drv" --scenario crossing --duration 60
-closed_loop crossing_worst_case "$obs" "dyn_mode:=worst_case" "$drv" --scenario crossing --duration 60
 closed_loop crossing_control "$obs" "dyn_enabled:=false" "$drv" --scenario crossing --duration 60 --expect-collision
 closed_loop hover_avoidance "$obs" "hover_avoidance:=true" "$drv" --scenario hover --duration 45
 closed_loop hover_control "$obs" "hover_avoidance:=false" "$drv" --scenario hover --duration 45 --expect-collision

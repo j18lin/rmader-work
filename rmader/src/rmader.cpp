@@ -459,7 +459,7 @@ void Rmader::setHeatCostForSolver()
   }
   const dynobs::Params dyn = par_.dyn;
   solver_->setHeatCost(
-      [tracks, dyn](const Eigen::Vector3d& p, double t) { return dyn.heat_weight * dynobs::heat(p, t, tracks, dyn); });
+      [tracks, dyn](const Eigen::Vector3d& q, double) { return dyn.heat_weight * dynobs::heat(q, tracks, dyn); });
 #endif
 }
 

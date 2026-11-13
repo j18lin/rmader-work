@@ -159,9 +159,9 @@ terrain or hardware. DLIO divergence remains a separate localization issue.
 
 Upstream R-MADER avoids an obstacle only if something broadcasts that
 obstacle's future trajectory as closed-form expressions of time. This checkout
-adds a second way in, modelled on the dynamic-obstacle handling of
-[SANDO](https://github.com/mit-acl/sando): an obstacle only has to be
-*observed*. Publish `rmader_msgs/ObstacleObservation` (stamp, id, position,
+adds a second way in, taken from SANDO (Kondo, Tordesillas, How,
+[arXiv:2604.07599](https://arxiv.org/abs/2604.07599)): an obstacle only has to
+be *observed*. Publish `rmader_msgs/ObstacleObservation` (stamp, id, position,
 optional velocity, bounding box) on `/obstacle_observations` and set
 `dyn_obstacles/enabled: true`. With it disabled, which is the default, the
 planner takes none of the new paths.
@@ -171,39 +171,55 @@ What the planner does with an observation:
 - **Tracks it.** One track per obstacle id: a velocity estimate when the
   observation carries none (position change over `velocity_window`, then
   low-pass filtered, so that observation noise is not amplified by the
-  observation rate), a static/dynamic label, and a timeout after which an
-  unseen obstacle is forgotten.
-- **Bounds where it can be.** For every time interval of the candidate
-  trajectory the obstacle becomes a box that grows with the time since it was
-  last seen. `mode: worst_case` grows it by `obst_max_vel` in every direction,
-  so it contains any motion within that speed bound. `mode: predicted` follows
-  a constant-velocity prediction for `prediction_horizon` seconds and grows at
-  the slower `prediction_growth`; it is clipped to the worst-case box. These
-  boxes go through the same convex-hull, A*, optimisation and delay-check path
-  as every other obstacle.
+  observation rate), a constant-velocity prediction, and a timeout after which
+  an unseen obstacle is forgotten.
+- **Bounds where it can be** (`mode: reachable`, the default). This is the
+  paper's inflation, Section IV-B: for the piece of trajectory that ends at
+  time `t`, the obstacle's box is grown on every side by
+  `obst_max_vel * (t - t_observed) + obst_position_error`, plus the fixed
+  `base_inflation` and half the agent's box. If every component of the
+  obstacle's velocity stays within `obst_max_vel`, it cannot leave that box,
+  whatever it does. The boxes go through the same convex-hull, A*,
+  optimisation and delay-check path as every other obstacle, and R-MADER's
+  per-interval hulls play the role of SANDO's time layers.
 - **Plans with a little extra room** (`planning_margin`). Every new
   observation moves the boxes slightly. A trajectory planned flush against
   them would be rejected by the delay check that follows, so the hulls used
   for planning are that much larger than the ones used for checking.
-- **Biases the A\* guess** (`heat/weight`, NLopt backend only) away from the
-  obstacles and the path they are predicted to take.
+- **Biases the A\* guess** with the paper's dynamic-obstacle heat map
+  (Section V-B, parameters from its Tables II and III): heat around each
+  obstacle's current position plus a time-discounted tube around its
+  predicted path, maximum over obstacles, added to the edge cost as
+  `length + w_heat * H`. NLopt backend only. It shapes the guess and has no
+  part in the safety argument.
 - **Keeps replanning near the goal** while any observed obstacle is tracked.
   Upstream stops once the committed trajectory reaches the goal.
 - **Optionally steps aside** (`hover_avoidance/enabled`) when an obstacle
   approaches while the agent is stopped at its goal, and returns afterwards.
 
-The same names as SANDO's configuration are used where the meaning matches
-(`obst_max_vel`, `prediction_horizon`, `obst_position_error`, the heat and
-hover-avoidance groups). The formulas are this checkout's own: they were
-written from SANDO's README and configuration file, not from the paper, so
-this is not a port of SANDO's corridor generation or its optimiser.
+### How this relates to the paper
+
+| | SANDO | Here |
+| --- | --- | --- |
+| Obstacle inflation per time layer | `r_n = v_max (n+1) dt + eps` around the estimate at planning time | Same formula per R-MADER interval, with the time measured from the observation, which also covers its age |
+| Speed and error bounds | Per axis (Assumptions 1 and 2) | Per axis |
+| Guarantee | Collision-free against tracked obstacles for the duration of the planned trajectory; no recursive feasibility | The same argument applies to `reachable` mode: each spline segment is separated by a plane from the box that contains the obstacle during that segment's interval. Not proven here beyond the unit test of the box property |
+| When replanning fails | Keep executing the previous trajectory, then hover | Same (R-MADER's committed trajectory ends at rest) |
+| Heat map | Static and dynamic terms on a voxel grid | Dynamic term only, evaluated at B-spline control points. There is no voxel map, so no static term |
+| Global path | Voxel A* in which reachable sets are soft costs only | R-MADER's control-point A*, in which the inflated boxes are also hard constraints |
+| Corridors and optimiser | Convex-decomposition polytopes per layer and path segment, MIQP with variable elimination, parallel time-allocation search | Not ported. R-MADER's separating planes and NLopt are used as they were |
+| Unknown space | Unknown-region boundaries inflated by the same `r_n` | Not ported: R-MADER has no map of unknown space, so an obstacle that has not been observed is not protected against |
+| Tracker | Point cloud, temporal occupancy grid, clustering, adaptive EKF | Observations arrive ready-made; windowed finite difference and low-pass filter |
+| `predicted` mode | Named as future work | Extension: box follows the constant-velocity prediction. Tighter, no guarantee |
+| Hover avoidance | In the released configuration, not in the paper | Own implementation |
+| `planning_margin`, replanning at GOAL_SEEN | Not applicable | Added to fit R-MADER's delay check and status machine |
 
 ### Test
 
 `tests/observed_obstacles_test.py` drives one planner in closed loop, with the
 same bounded tracking model as the two-agent test. The obstacles never publish
 a trajectory; the planner gets 20 Hz position observations with up to 0.03 m
-of noise and no velocity.
+of noise per axis and no velocity.
 
 - `crossing`: the agent shuttles 8 m back and forth while three 0.6 m
   obstacles wander through its corridor, each heading for a new random
@@ -215,60 +231,76 @@ Each scenario also has a control run with the feature off, which has to
 collide for the scenario to mean anything.
 
 ~~~bash
-cloud/run_tests.sh          # everything below, plus the unit tests
+cloud/run_tests.sh          # seed 7 of everything below, plus the unit tests
 ~~~
 
-Results from one run of each on the 4-CPU cloud container (NLopt backend,
-2 m/s agent, 0.35 m agent box). The gap is the smallest distance between the
+Results on the 4-CPU cloud container (NLopt backend, 2 m/s agent, 0.35 m
+agent box, 60 s crossing runs). The gap is the smallest distance between the
 agent's box and an obstacle's box; negative means they overlapped.
 
-| Run | Minimum gap | Time overlapping | Outcome |
-| --- | --- | --- | --- |
-| crossing, `predicted` | 0.818 m | 0 s | 6 legs in 60 s |
-| crossing, `worst_case` | 1.555 m | 0 s | 4 legs in 60 s |
-| crossing, feature off | -0.460 m | 11.2 s | 9 legs, straight through the obstacles |
-| hover, avoidance on | 0.872 m | 0 s | moved 2.6 m aside, back within 0.01 m of the goal |
-| hover, avoidance off | -0.475 m | 2.4 s | stayed put and was hit |
+| Run | Obstacle seed | Minimum gap | Time overlapping | Outcome |
+| --- | --- | --- | --- | --- |
+| crossing, `reachable` | 7 | 1.63 m | 0 s | 3 legs |
+| crossing, `reachable` | 11 | 1.33 m | 0 s | 4 legs |
+| crossing, `reachable` | 23 | 1.33 m | 0 s | 5 legs |
+| crossing, `predicted` | 7 | 0.80 m | 0 s | 5 legs |
+| crossing, `predicted` | 11 | 0.64 m | 0 s | 6 legs |
+| crossing, `predicted` | 23 | -0.47 m | 31 s | 2 legs; boxed in while stopped |
+| crossing, feature off | 7 | -0.46 m | 11.4 s | 9 legs, straight through the obstacles |
+| hover, avoidance on | n/a | 1.46 m | 0 s | moved 2.8 m aside, back within 0.01 m of the goal |
+| hover, avoidance off | n/a | -0.48 m | 2.4 s | stayed put and was hit |
 
-Three more `predicted` crossing runs with different obstacle seeds (7, 11, 23)
-kept gaps of 0.80 m, 0.57 m and 0.70 m with six legs each. That is four clean
-runs, not a collision rate.
+`reachable`, the paper's inflation, was clean in all three runs and slower:
+it keeps the agent out of the corridor until there is room. Three runs are not
+a collision rate.
 
-An earlier build did collide in one `predicted` run. It estimated velocity by
-differencing consecutive observations, so the boxes jittered, the delay check
-rejected 120 of 160 candidates, the agent ran out of committed trajectory in
-the middle of the corridor, and an obstacle drove into it while it was
-stopped. `velocity_window` and `planning_margin` came out of that; rejections
-then fell to between 18 and 56 per run. The underlying exposure remains: an
-agent that stops among moving obstacles can be hit.
+`predicted` failed one run in three. With the tighter boxes the agent goes
+into the corridor, and in the failing run it came to the end of its committed
+trajectory there. From then on its own position was inside some obstacle's
+inflated box almost all the time, so the A* search had no feasible start (97
+failures), it sat still for about 40 s, and the wandering obstacles passed
+over it. This is the failure the paper describes for planners whose start can
+fall inside a blocked region, and the reason to treat `predicted` as
+experimental.
+
+An earlier build was worse in `predicted` mode: it estimated velocity by
+differencing consecutive observations, so the boxes jittered and the delay
+check rejected 120 of 160 candidates. `velocity_window` and `planning_margin`
+came out of that; rejections then fell to between 18 and 56 per run.
 
 The two-agent timing test above misses its 0.5 m separation gate on this
 container with or without these changes: 0.385 m and 0.462 m (one leg
-timeout) for the previous commit, 0.644 m, 0.435 m and 0.459 m for this one,
-all 90 s runs. The 16-CPU laptop results quoted below were not reproduced
-here.
+timeout) for the previous commit, and 0.644 m, 0.435 m, 0.459 m and 0.455 m
+for this branch, all 90 s runs. The 16-CPU laptop results quoted below were
+not reproduced here.
 
 ### Limits
 
-- `worst_case` is a guarantee only against obstacles that respect
-  `obst_max_vel`, are observed before they are close, and only up to the end
-  of the committed trajectory, where the agent is at rest. A stopped agent can
-  still be run into unless hover avoidance moves it. If a track is seen moving
-  faster than the bound, that track's bound is raised to the measured speed.
-- `predicted` is not a guarantee. It is tighter because it trusts a
-  constant-velocity prediction.
-- Worst-case boxes grow quickly: at 0.5 m/s an obstacle is a 3 m wider box
+- `reachable` holds only against obstacles that are being tracked, whose
+  velocity components stay within `obst_max_vel`, and whose observed position
+  is within `obst_position_error` per axis, and only up to the end of the
+  committed trajectory, where the agent is at rest. As in the paper there is
+  no recursive feasibility: a stopped agent can still be run into unless hover
+  avoidance moves it. If a track is seen moving faster than the bound, that
+  track's bound is raised to the measured speed.
+- An obstacle that has not been observed yet is not protected against. SANDO
+  handles that by inflating the boundary of unknown space, which needs a map
+  this planner does not have.
+- `predicted` is not a guarantee, and failed one of three test runs (above).
+- Reachable boxes grow quickly: at 0.5 m/s an obstacle is a 3 m wider box
   three seconds into the plan. In clutter this can leave no path, and the
   agent then stops at the end of its committed trajectory.
+- Hover avoidance only acts when the agent is stopped at its goal, not when it
+  is stopped anywhere else.
 - Nothing in this repository produces observations from sensors. The test
   publishes them from ground truth with noise; a detector or motion-capture
   relay has to do that on a real system. The rover bridge in `integration/`
   does not forward obstacles yet.
 - The scenarios above use a single aerial agent. Several agents sharing
   observed obstacles, ground mode with observed obstacles, and the Gurobi
-  backend were not run. The heat cost is compiled out of the Gurobi build,
+  backend were not run. The heat map is compiled out of the Gurobi build,
   which was not built here.
-- While fixing this, an upstream bug surfaced: `dynTraj2dynTrajCompiled` never
+- While doing this, an upstream bug surfaced: `dynTraj2dynTrajCompiled` never
   copied `is_agent`, so the planner read an uninitialised flag. It is now
   copied and the struct is default-initialised.
 

@@ -2,9 +2,9 @@
   <!-- One planner among obstacles it only knows from /obstacle_observations.
        Driven by tests/observed_obstacles_test.py. -->
   <arg name="dyn_enabled" default="true"/>
-  <arg name="dyn_mode" default="predicted"/>
+  <arg name="dyn_mode" default="reachable"/>
   <arg name="hover_avoidance" default="false"/>
-  <arg name="heat_weight" default="2.0"/>
+  <arg name="heat_weight" default="5.0"/>
 
   <group ns="SQ01s">
     <node pkg="rmader" type="rmader_node" name="rmader" output="screen">

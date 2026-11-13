@@ -104,15 +104,15 @@ void testVelocityEstimateWithNoise()
 }
 
 // The property the planner relies on: an obstacle that respects the speed bound never leaves the
-// worst-case box, whatever it does after it was observed.
-void testWorstCaseContainsAnyBoundedMotion()
+// reachable box, whatever it does after it was observed.
+void testReachableBoxContainsAnyBoundedMotion()
 {
   std::mt19937 rng(42);
   std::uniform_real_distribution<double> unit(-1.0, 1.0);
   std::uniform_real_distribution<double> zero_one(0.0, 1.0);
 
   dynobs::Params par;
-  par.mode = dynobs::Mode::WORST_CASE;
+  par.mode = dynobs::Mode::REACHABLE;
   par.obst_max_vel = 0.8;
   par.obst_position_error = 0.05;
 
@@ -127,12 +127,12 @@ void testWorstCaseContainsAnyBoundedMotion()
     for (int k = 0; k < 2; k++)
     {
       Eigen::Vector3d noise(unit(rng), unit(rng), unit(rng));
-      noise *= par.obst_position_error / std::sqrt(3.0);  // |noise| <= obst_position_error
+      noise *= par.obst_position_error;  // per-axis error <= epsilon (Assumption 2)
       tracker.update(observation(1, t, truth + noise));
       if (k == 0)
       {
         Eigen::Vector3d v(unit(rng), unit(rng), unit(rng));
-        v = v.normalized() * par.obst_max_vel * zero_one(rng);
+        v *= par.obst_max_vel;
         truth += v * 0.1;
         t += 0.1;
       }
@@ -143,22 +143,27 @@ void testWorstCaseContainsAnyBoundedMotion()
     track.max_vel = par.obst_max_vel;
     const double t_observed = t;
 
-    // Adversarial motion: a new random direction at full speed every 50 ms.
+    // Adversarial motion under the paper's Assumption 1 (each velocity component bounded by v_max): every
+    // 50 ms, either full speed along every axis with random signs, or a random velocity inside the bound.
     const double dt = 0.05;
     for (int step = 0; step < 80; step++)
     {
       Eigen::Vector3d v(unit(rng), unit(rng), unit(rng));
-      truth += v.normalized() * par.obst_max_vel * dt;
+      if (zero_one(rng) < 0.5)
+      {
+        v = v.array().sign().matrix();
+      }
+      truth += v * par.obst_max_vel * dt;
       t += dt;
 
       const double t_a = t_observed + zero_one(rng) * (t - t_observed);
       const dynobs::Box box =
           dynobs::centerBox(track, t_a, t, par, Eigen::Vector3d::Constant(par.obst_position_error));
-      check(box.contains(truth, 1e-9), "bounded motion stays inside the worst-case box");
+      check(box.contains(truth, 1e-9), "bounded motion stays inside the reachable box");
       checked++;
     }
   }
-  check(checked == 2000 * 80, "worst-case property was exercised");
+  check(checked == 2000 * 80, "reachable-set property was exercised");
 }
 
 void testBoxes()
@@ -175,12 +180,12 @@ void testBoxes()
   dynobs::Track track;
   tracker.get(1, track);
 
-  par.mode = dynobs::Mode::WORST_CASE;
+  par.mode = dynobs::Mode::REACHABLE;
   const dynobs::Box early = dynobs::centerBox(track, 1.0, 1.5, par);
   const dynobs::Box late = dynobs::centerBox(track, 1.5, 3.0, par);
   check(std::fabs(early.hi.x() - 1.0) < 1e-9 && std::fabs(early.lo.x() - 0.0) < 1e-9,
-        "worst-case box grows by max_vel * elapsed");
-  check(inside(early, late), "worst-case boxes only grow with time");
+        "reachable box grows by max_vel * elapsed");
+  check(inside(early, late), "reachable boxes only grow with time");
   check(inside(dynobs::centerBox(track, 0.2, 0.9, par), dynobs::centerBox(track, 1.0, 1.0, par)),
         "times before the observation are clamped to it");
 
@@ -190,10 +195,10 @@ void testBoxes()
     for (double span = 0.0; span < 2.0; span += 0.21)
     {
       dynobs::Params worst_par = par;
-      worst_par.mode = dynobs::Mode::WORST_CASE;
+      worst_par.mode = dynobs::Mode::REACHABLE;
       const dynobs::Box predicted = dynobs::centerBox(track, t_a, t_a + span, par);
       check(inside(predicted, dynobs::centerBox(track, t_a, t_a + span, worst_par)),
-            "predicted box never exceeds the worst-case box");
+            "predicted box never exceeds the reachable box");
       // An obstacle that really keeps its velocity for the prediction horizon is inside the predicted box.
       for (double t = t_a; t <= t_a + span + 1e-9; t += 0.05)
       {
@@ -205,7 +210,7 @@ void testBoxes()
 
   // The predicted box is strictly tighter than the worst case for a horizon that matters.
   dynobs::Params worst_par = par;
-  worst_par.mode = dynobs::Mode::WORST_CASE;
+  worst_par.mode = dynobs::Mode::REACHABLE;
   const dynobs::Box predicted = dynobs::centerBox(track, 1.5, 2.0, par);
   const dynobs::Box worst = dynobs::centerBox(track, 1.5, 2.0, worst_par);
   check((predicted.hi - predicted.lo).prod() < 0.5 * (worst.hi - worst.lo).prod(), "prediction is less conservative");
@@ -219,7 +224,7 @@ void testBoxes()
         "occupancy margin is body + error + inflation + extra");
   check(occupancy.vertexes().size() == 8, "a box has eight vertexes");
 
-  // A track that is not moving does not grow in predicted mode, but does in worst-case mode.
+  // A track that is not moving does not grow in predicted mode, but does in reachable mode.
   dynobs::Tracker still(par);
   still.update(observation(2, 0.0, Eigen::Vector3d(2, 2, 0)));
   still.update(observation(2, 1.0, Eigen::Vector3d(2, 2, 0)));
@@ -229,31 +234,53 @@ void testBoxes()
   const dynobs::Box parked_predicted = dynobs::centerBox(parked, 1.0, 3.0, par);
   check((parked_predicted.hi - parked_predicted.lo).norm() < 1e-9, "static track does not grow when predicted");
   const dynobs::Box parked_worst = dynobs::centerBox(parked, 1.0, 3.0, worst_par);
-  check(std::fabs(parked_worst.hi.x() - parked_worst.lo.x() - 4.0) < 1e-9, "worst case grows even for a parked track");
+  check(std::fabs(parked_worst.hi.x() - parked_worst.lo.x() - 4.0) < 1e-9, "reachable box grows even for a parked track");
 }
 
+// Section V-B of the paper, with its Table II values (the defaults).
 void testHeat()
 {
   dynobs::Params par;
   par.velocity_filter_alpha = 1.0;
+  par.prediction_horizon = 1.0;
   dynobs::Tracker tracker(par);
   tracker.update(observation(1, 0.0, Eigen::Vector3d(0, 0, 0)));
-  tracker.update(observation(1, 1.0, Eigen::Vector3d(0.5, 0, 0)));  // heading +x at 0.5 m/s
+  tracker.update(observation(1, 1.0, Eigen::Vector3d(0.5, 0, 0)));  // at (0.5, 0, 0), heading +x at 0.5 m/s
+  const Eigen::Vector3d here(0.5, 0, 0);
 
-  const double ahead = dynobs::heat(Eigen::Vector3d(0.9, 0.0, 0), 1.0, tracker.tracks(), par);
-  const double beside = dynobs::heat(Eigen::Vector3d(0.5, 0.6, 0), 1.0, tracker.tracks(), par);
-  const double behind = dynobs::heat(Eigen::Vector3d(0.1, 0.0, 0), 2.0, tracker.tracks(), par);
-  const double far = dynobs::heat(Eigen::Vector3d(10, 10, 0), 1.0, tracker.tracks(), par);
-  check(ahead > beside && beside > 0.0, "heat is highest on the predicted path");
-  check(dynobs::heat(Eigen::Vector3d(0.9, 0.0, 0), 2.0, tracker.tracks(), par) > behind,
-        "path already travelled is cooler than the obstacle's predicted position");
-  check(far == 0.0, "no heat far from every obstacle");
-  check(ahead <= par.heat_max, "heat saturates");
+  // At the obstacle: base = alpha_0 and the j = 0 tube sample contributes alpha_1 * 1.
+  check(std::fabs(dynobs::heat(here, tracker.tracks(), par) - 3.0) < 1e-9, "heat at the obstacle is alpha_0 + alpha_1");
 
+  // Base term alone, by hand: R_0 = 0.2 + 0.1, R^d = R_0 + 0.5 * 1 = 0.8; 0.6 m behind the obstacle the
+  // tube contributes nothing (every sample is further than its radius), so H = (1 - 0.6 / 0.8)^2.
+  const double behind = dynobs::heat(here + Eigen::Vector3d(-0.6, 0, 0), tracker.tracks(), par);
+  check(std::fabs(behind - 0.0625) < 1e-9, "base heat matches the formula");
+
+  // Same distance from the obstacle: on its predicted path is hotter than beside it or behind it.
+  const double ahead = dynobs::heat(here + Eigen::Vector3d(0.6, 0, 0), tracker.tracks(), par);
+  const double beside = dynobs::heat(here + Eigen::Vector3d(0, 0.6, 0), tracker.tracks(), par);
+  check(ahead > beside && beside > behind, "heat is highest on the predicted path");
+
+  check(dynobs::heat(Eigen::Vector3d(10, 10, 0), tracker.tracks(), par) == 0.0, "no heat far from every obstacle");
+
+  // Max aggregation: a second obstacle in the same place does not add up.
+  dynobs::Tracker two(par);
+  for (int id = 1; id <= 2; id++)
+  {
+    two.update(observation(id, 0.0, Eigen::Vector3d(0, 0, 0)));
+    two.update(observation(id, 1.0, Eigen::Vector3d(0.5, 0, 0)));
+  }
+  check(std::fabs(dynobs::heat(here, two.tracks(), par) - 3.0) < 1e-9, "obstacles combine by maximum, not sum");
+
+  dynobs::Params capped = par;
+  capped.heat_max = 1.5;
+  check(std::fabs(dynobs::heat(here, tracker.tracks(), capped) - 1.5) < 1e-12, "heat saturates at H_max");
+
+  // An obstacle that is not moving keeps its base heat; its tube collapses onto it.
   dynobs::Tracker still(par);
   still.update(observation(2, 0.0, Eigen::Vector3d(0, 0, 0)));
   still.update(observation(2, 1.0, Eigen::Vector3d(0, 0, 0)));
-  check(dynobs::heat(Eigen::Vector3d(0.1, 0, 0), 1.0, still.tracks(), par) == 0.0, "static tracks have no heat");
+  check(dynobs::heat(Eigen::Vector3d(0.6, 0, 0), still.tracks(), par) > 0.0, "a parked obstacle still has heat");
 }
 
 void testHoverEvasion()
@@ -288,7 +315,7 @@ void testHoverEvasion()
 void testModeNames()
 {
   dynobs::Mode mode = dynobs::Mode::PREDICTED;
-  check(dynobs::modeFromString("worst_case", mode) && mode == dynobs::Mode::WORST_CASE, "worst_case parses");
+  check(dynobs::modeFromString("reachable", mode) && mode == dynobs::Mode::REACHABLE, "reachable parses");
   check(dynobs::modeFromString("predicted", mode) && mode == dynobs::Mode::PREDICTED, "predicted parses");
   check(!dynobs::modeFromString("optimistic", mode), "unknown mode is rejected");
 }
@@ -298,7 +325,7 @@ int main()
 {
   testTracker();
   testVelocityEstimateWithNoise();
-  testWorstCaseContainsAnyBoundedMotion();
+  testReachableBoxContainsAnyBoundedMotion();
   testBoxes();
   testHeat();
   testHoverEvasion();

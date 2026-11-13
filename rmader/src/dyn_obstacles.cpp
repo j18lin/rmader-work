@@ -61,9 +61,9 @@ double falloff(double distance, double radius, double power)
 
 bool modeFromString(const std::string& name, Mode& mode)
 {
-  if (name == "worst_case")
+  if (name == "reachable")
   {
-    mode = Mode::WORST_CASE;
+    mode = Mode::REACHABLE;
     return true;
   }
   if (name == "predicted")
@@ -90,9 +90,10 @@ Box centerBox(const Track& track, double t_a, double t_b, const Params& par, con
   const double tau_a = elapsed(track, t_a);
   const double tau_b = std::max(tau_a, elapsed(track, t_b));
 
-  // The reachable set only grows with time, so the set at t_b covers the whole interval.
+  // SANDO Eq. (11): r = v_max * (time to the end of the interval) [+ epsilon, which is in the margin]. The
+  // reachable set only grows with time, so the set at t_b covers the whole interval.
   const Box worst = boxAround(track.pos, track.max_vel * tau_b, margin);
-  if (par.mode == Mode::WORST_CASE)
+  if (par.mode == Mode::REACHABLE)
   {
     return worst;
   }
@@ -182,7 +183,8 @@ bool Tracker::update(const Observation& obs)
   it->num_observations++;
   // An obstacle seen moving faster than the configured bound shows the bound is wrong for it: use what was
   // measured instead, so that the boxes stay an over-approximation.
-  it->max_vel = std::max(par_.obst_max_vel, it->vel.norm());
+  // The bound is per axis (Assumption 1 of the paper).
+  it->max_vel = std::max(par_.obst_max_vel, it->vel.lpNorm<Eigen::Infinity>());
   it->is_dynamic = (par_.velocity_threshold <= 0.0) || (it->vel.norm() > par_.velocity_threshold);
   return true;
 }
@@ -214,29 +216,35 @@ bool Tracker::get(int id, Track& track) const
   return true;
 }
 
-double heat(const Eigen::Vector3d& p, double t, const std::vector<Track>& tracks, const Params& par)
+double heat(const Eigen::Vector3d& q, const std::vector<Track>& tracks, const Params& par)
 {
-  double total = 0.0;
+  const double horizon = par.prediction_horizon;        // T_h
+  const double tau = par.heat_tau_ratio * horizon;      // tau^d
+  const int samples = std::max(1, par.heat_num_samples);  // M_tube
+
+  double hottest = 0.0;
   for (const Track& track : tracks)
   {
-    if (!track.is_dynamic)
+    // R_0 = max_i h_i + r_margin, R^d = R_0 + v_max * T_h
+    const double base_radius = 0.5 * track.bbox.maxCoeff() + par.base_inflation;
+    const double reach_radius = base_radius + track.max_vel * horizon;
+    const double base =
+        par.heat_alpha_base * falloff((q - track.pos).norm(), reach_radius, par.heat_power_base);
+
+    // Tube: max over the sampled prediction of w(t_j) * [1 - |q - mu(t_j)| / (R_0 + gamma t_j)]^q
+    const double growth = (par.heat_tube_growth < 0.0) ? track.max_vel : par.heat_tube_growth;
+    double tube = 0.0;
+    for (int j = 0; j < samples; j++)
     {
-      continue;  // static obstacles are hard constraints only
+      const double t_j = (samples > 1) ? horizon * j / (samples - 1.0) : 0.0;
+      const double weight = (tau > 0.0) ? std::exp(-t_j / tau) : (t_j > 0.0 ? 0.0 : 1.0);
+      const Eigen::Vector3d center = track.pos + track.vel * t_j;  // constant-velocity prediction mu(t_j)
+      tube = std::max(tube, weight * falloff((q - center).norm(), base_radius + growth * t_j, par.heat_power_tube));
     }
-    const double tau = elapsed(track, t);
-    const double body = 0.5 * track.bbox.norm();
 
-    // Reachability blob: everything the obstacle could have reached by time t, fading towards its edge.
-    const double reach = body + par.heat_tube_radius + track.max_vel * tau;
-    total += par.heat_alpha_reach * falloff((p - track.pos).norm(), reach, par.heat_power);
-
-    // Tube around the part of the predicted path the obstacle has not travelled yet at time t.
-    const Eigen::Vector3d from = predictedCenter(track, tau, par);
-    const Eigen::Vector3d to = predictedCenter(track, par.prediction_horizon, par);
-    const double distance = (p - closestPointOnSegment(p, from, to)).norm();
-    total += par.heat_alpha_tube * falloff(distance, body + par.heat_tube_radius, par.heat_power);
+    hottest = std::max(hottest, base + par.heat_alpha_tube * tube);  // max over obstacles
   }
-  return std::min(total, par.heat_max);
+  return std::min(hottest, par.heat_max);
 }
 
 bool hoverEvasionGoal(const Eigen::Vector3d& pos, double now, const std::vector<Track>& tracks, const Params& par,

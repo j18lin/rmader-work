@@ -179,38 +179,44 @@ nlopt:
 # LD_AUGLAG_EQ, LN_BOBYQA, LN_NEWUOA, LN_NEWUOA_BOUND, LN_COBYLA, LD_CCSAQ, LD_TNEWTON_PRECOND_RESTART, ...
 # LD_TNEWTON_RESTART, LD_TNEWTON_PRECOND, LD_VAR1, LD_LBFGS_NOCEDAL, COBYLA
 ###############################################################
-# Observation-based dynamic obstacles (SANDO-style)
+# Observation-based dynamic obstacles (after SANDO, arXiv:2604.07599)
 ###############################################################
 # Obstacles that only show up as observations on /obstacle_observations
 # (rmader_msgs/ObstacleObservation), with no trajectory of their own to
 # broadcast. Disabled by default: with enabled=false the planner behaves
 # exactly as upstream. See UGV_NOTES.md, "Observed dynamic obstacles".
+# Symbols in brackets are the paper's.
 
 dyn_obstacles:
   enabled: false
-  mode: "predicted"         # "predicted": constant-velocity prediction with a slowly growing box (tighter)
-                            # "worst_case": box grows by obst_max_vel * time since last seen (holds for any motion within the bound)
-  obst_max_vel: 0.5         # [m/s] speed bound assumed for every observed obstacle
-  obst_position_error: 0.05 # [m] bound on the error of an observed position
-  base_inflation: 0.1       # [m] constant extra margin around every observed obstacle
-  prediction_horizon: 1.0   # [s] predicted: how long the constant-velocity prediction is extrapolated
-  prediction_growth: 0.2    # [m/s] predicted: growth rate of the box along the prediction
+  mode: "reachable"         # "reachable": SANDO's inflation. Box grows by obst_max_vel * time since last seen, so it
+                            #              holds for any motion within the speed bound
+                            # "predicted": not in the paper. Constant-velocity prediction with a slowly growing box;
+                            #              tighter, no guarantee
+  obst_max_vel: 0.5         # [m/s] [v_max^obs] bound on each component of an obstacle's velocity
+  obst_position_error: 0.05 # [m] [epsilon] bound on the per-axis error of an observed position
+  base_inflation: 0.1       # [m] [r_margin] constant extra margin around every observed obstacle
+  prediction_horizon: 1.0   # [s] [T_h] length of the constant-velocity prediction (heat map, predicted mode, hover avoidance)
+  prediction_growth: 0.2    # [m/s] predicted mode: growth rate of the box along the prediction
   velocity_window: 0.5      # [s] velocity = change of position over this long (robust to observation noise)
   velocity_filter_alpha: 0.6 # (0,1] weight of the newest velocity measurement
   planning_margin: 0.15     # [m] extra clearance while planning, so that the next observation does not invalidate the plan
-  velocity_threshold: 0.05  # [m/s] slower tracks count as static in predicted mode. 0.0 --> never static
+  velocity_threshold: 0.05  # [m/s] slower tracks count as static in predicted mode and never trigger hover avoidance
   track_timeout: 5.0        # [s] forget an obstacle that has not been observed for this long
 
-  heat:                     # soft cost that keeps the A* guess away from obstacles and their predicted path (NLopt only)
-    weight: 0.0             # 0.0 disables it. Extra cost per metre of path = weight * heat
-    alpha_reach: 0.2        # weight of the blob of positions the obstacle can reach
-    alpha_tube: 1.0         # weight of the tube around its predicted path
-    tube_radius: 0.5        # [m]
-    power: 2.0              # falloff exponent
-    max: 2.0                # saturation of the summed heat
+  heat:                     # dynamic-obstacle heat map for the A* guess (paper Section V; NLopt backend only)
+    weight: 5.0             # [w_heat] edge cost = length + weight * heat. 0.0 disables it
+    alpha_base: 1.0         # [alpha_0^d] heat around the obstacle's current position
+    alpha_tube: 2.0         # [alpha_1^d] heat of the tube around its predicted path
+    power_base: 2.0         # [p^d]
+    power_tube: 2.0         # [q^d]
+    tube_growth: -1.0       # [gamma_k, m/s] growth of the tube radius along the prediction. Negative --> obst_max_vel
+    tau_ratio: 0.5          # [tau_ratio^d] predictions are discounted by exp(-t / (tau_ratio * prediction_horizon))
+    num_samples: 15         # [M_tube] samples of the predicted path
+    max: 50.0               # [H_max]
 
-  hover_avoidance:          # move out of the way of an obstacle that approaches while stopped at the goal
-    enabled: false
+  hover_avoidance:          # from SANDO's released configuration, not the paper: move out of the way of an obstacle
+    enabled: false          # that approaches while stopped at the goal
     trigger_dist: 4.0       # [m] evade when its predicted path comes this close
     evasion_dist: 3.0       # [m] how far to move; the agent returns once the goal is clear
     is_2d: true             # keep the evasion in the horizontal plane

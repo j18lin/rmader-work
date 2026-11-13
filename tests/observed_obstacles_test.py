@@ -32,8 +32,8 @@ from snapstack_msgs.msg import Goal, State
 NAME = "SQ01s"
 AGENT_BBOX = 0.35
 OBSTACLE_BBOX = 0.6
-OBSTACLE_MAX_SPEED = 0.5      # must match dyn_obstacles/obst_max_vel in the launch file
-OBSERVATION_NOISE = 0.03      # [m] bound on the position error; matches dyn_obstacles/obst_position_error
+OBSTACLE_MAX_SPEED = 0.5      # [m/s] must not exceed dyn_obstacles/obst_max_vel in the launch file
+OBSERVATION_NOISE = 0.03      # [m] per-axis bound on the position error; matches dyn_obstacles/obst_position_error
 OBSERVATION_HZ = 20.0
 HEIGHT = 1.5
 
@@ -169,8 +169,7 @@ def main():
             message.header.stamp = stamp
             message.header.frame_id = "world"
             message.id = 4000 + index
-            noisy = [value + rng.uniform(-OBSERVATION_NOISE, OBSERVATION_NOISE) / math.sqrt(3.0)
-                     for value in obstacle.position]
+            noisy = [value + rng.uniform(-OBSERVATION_NOISE, OBSERVATION_NOISE) for value in obstacle.position]
             message.pos.x, message.pos.y, message.pos.z = noisy
             message.has_vel = False
             message.bbox.x = message.bbox.y = message.bbox.z = OBSTACLE_BBOX

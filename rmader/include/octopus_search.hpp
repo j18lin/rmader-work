@@ -77,7 +77,7 @@ public:
 
   void setBias(double bias);
 
-  // Optional soft cost (per metre of path) of having a control point at a position at a time. Used to bias
+  // Optional soft cost, added to the edge length, of having a control point at a position at a time. Used to bias
   // the search away from observed dynamic obstacles; an empty function disables it.
   void setHeatCost(std::function<double(const Eigen::Vector3d&, double)> heat_cost);
 
