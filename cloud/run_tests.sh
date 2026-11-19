@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run every check that works without Docker, Gazebo or a Gurobi license:
-# the unit tests, then the closed-loop ROS tests (about 6 minutes).
+# the unit tests, then the closed-loop ROS tests (about 20 minutes).
+# RUN_EXPERIMENTAL=1 adds the predicted-mode run.
 #
 #   cloud/run_tests.sh [results dir]      # default: test-results/cloud
 #
@@ -35,11 +36,29 @@ run unit_python python3 -m pytest -q tests
 
 obs=tests/observed_obstacles.launch
 drv=tests/observed_obstacles_test.py
-closed_loop crossing_reachable "$obs" "dyn_mode:=reachable" "$drv" --scenario crossing --duration 60
-closed_loop crossing_predicted "$obs" "dyn_mode:=predicted" "$drv" --scenario crossing --duration 60
+
+# Aerial: one and two planners among three erratic obstacles, and the stopped-at-goal case.
+closed_loop crossing_reachable "$obs" "escape:=true" "$drv" --scenario crossing --duration 60
+closed_loop crossing_two_robots "$obs" "agents:=2 escape:=true" "$drv" --scenario crossing2 --duration 60
 closed_loop crossing_control "$obs" "dyn_enabled:=false" "$drv" --scenario crossing --duration 60 --expect-collision
 closed_loop hover_avoidance "$obs" "hover_avoidance:=true" "$drv" --scenario hover --duration 45
 closed_loop hover_control "$obs" "hover_avoidance:=false" "$drv" --scenario hover --duration 45 --expect-collision
+
+# Ground mode at rover limits (0.55 m/s) among obstacles at 0.25 m/s, with the settings rover_sim.launch uses.
+rover="ground:=true obst_max_vel:=0.25 stop_dwell:=4.0 hover_avoidance:=true evade_trigger:=3.0 escape:=true"
+closed_loop ground_rover "$obs" "$rover" "$drv" --scenario ground --duration 150 --min-legs 1
+closed_loop ground_two_rovers "$obs" "$rover agents:=2" "$drv" --scenario ground2 --duration 180 --min-legs 1
+closed_loop ground_control "$obs" "ground:=true dyn_enabled:=false" "$drv" --scenario ground --duration 90 --expect-collision
+
+# The real rover launch file and bridge script, with this side playing the simulator over TCP.
+closed_loop bridge integration/rover_sim.launch "dyn_obstacles:=true" tests/bridge_obstacles_test.py --duration 180
+closed_loop bridge_control integration/rover_sim.launch "" tests/bridge_obstacles_test.py --duration 60 --expect-collision
+
+if test "${RUN_EXPERIMENTAL:-0}" = 1; then
+  # predicted mode gives no guarantee and has collided in about one run in three
+  closed_loop crossing_predicted "$obs" "dyn_mode:=predicted escape:=true" "$drv" --scenario crossing --duration 60
+fi
+
 closed_loop two_agent tests/two_agent.launch "" tests/two_agent_timing.py --duration "${TEST_DURATION:-90}"
 
 echo

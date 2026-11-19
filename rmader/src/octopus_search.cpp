@@ -25,6 +25,21 @@ typedef RMADER_timers::Timer MyTimer;
 //   return (T(0) < val) - (val < T(0));
 // }
 
+namespace
+{
+// The j-th of `num` evenly spaced velocity samples in [low, high]. With a single sample on an axis (z for a
+// ground robot, a_star_samp_z: 1) the spacing (high - low) / (num - 1) is a division by zero that turned
+// every candidate into NaN, so the search never left its first node. Use the velocity closest to zero.
+double velocitySample(double low, double high, int j, int num)
+{
+  if (num <= 1)
+  {
+    return std::min(std::max(0.0, low), high);
+  }
+  return low + j * ((high - low) / (num - 1));
+}
+}  // namespace
+
 OctopusSearch::OctopusSearch(std::string basis, int num_pol, int deg_pol, double alpha_shrink)
 {
   p_ = deg_pol;
@@ -330,9 +345,9 @@ void OctopusSearch::computeLimitsVoxelSize(double& min_voxel_size, double& max_v
       {
         // sample a velocity
         Eigen::Vector3d vi;
-        vi << constraint_xL + jx * ((constraint_xU - constraint_xL) / (num_samples_x_ - 1)),  /////////
-            constraint_yL + jy * ((constraint_yU - constraint_yL) / (num_samples_y_ - 1)),    /////////
-            constraint_zL + jz * ((constraint_zU - constraint_zL) / (num_samples_z_ - 1));    /////////
+        vi << velocitySample(constraint_xL, constraint_xU, jx, num_samples_x_),
+            velocitySample(constraint_yL, constraint_yU, jy, num_samples_y_),
+            velocitySample(constraint_zL, constraint_zU, jz, num_samples_z_);
 
         if (vi.norm() < 0.000001)  // remove the cases where vi is very small
         {
@@ -969,9 +984,6 @@ void OctopusSearch::expandAndAddToQueue(Node& current, double constraint_xL, dou
   neighbor.index = current.index + 1;
   neighbor.previous = &current;
 
-  double delta_x = ((constraint_xU - constraint_xL) / (num_samples_x_ - 1));
-  double delta_y = ((constraint_yU - constraint_yL) / (num_samples_y_ - 1));
-  double delta_z = ((constraint_zU - constraint_zL) / (num_samples_z_ - 1));
 
   // MyTimer timer_forLoop(true);
   for (auto comb : all_combinations_)
@@ -980,7 +992,9 @@ void OctopusSearch::expandAndAddToQueue(Node& current, double constraint_xL, dou
     jy = std::get<1>(comb);
     jz = std::get<2>(comb);
 
-    vi << constraint_xL + jx * delta_x, constraint_yL + jy * delta_y, constraint_zL + jz * delta_z;
+    vi << velocitySample(constraint_xL, constraint_xU, jx, num_samples_x_),
+        velocitySample(constraint_yL, constraint_yU, jy, num_samples_y_),
+        velocitySample(constraint_zL, constraint_zU, jz, num_samples_z_);
 
     neighbor.qi = (knots_(i + p_ + 1) - knots_(i + 1)) * vi / (1.0 * p_) + current.qi;
 
@@ -1079,6 +1093,9 @@ bool OctopusSearch::run(std::vector<Eigen::Vector3d>& result, std::vector<Eigen:
 
   std::cout << "[A*] Running..." << std::endl;
 
+  // Why nodes were dropped, reported when the search does not reach the goal.
+  int n_popped = 0, n_duplicate_or_outside = 0, n_no_velocity = 0, n_collision = 0, n_collision_first = 0;
+
   MyTimer timer_astar(true);
 
   Node nodeq2;
@@ -1113,6 +1130,7 @@ bool OctopusSearch::run(std::vector<Eigen::Vector3d>& result, std::vector<Eigen:
 
     *current_ptr = openList_.top();  // copy the first element onto (*current_ptr)
     openList_.pop();                 // remove it from the list
+    n_popped++;
 
     double dist = ((*current_ptr).qi - goal_).norm();
 
@@ -1138,6 +1156,7 @@ bool OctopusSearch::run(std::vector<Eigen::Vector3d>& result, std::vector<Eigen:
         (*current_ptr).qi.z() > z_max_ || (*current_ptr).qi.z() < z_min_ ||                   /// Outside the limits
         ((*current_ptr).qi - q0_).norm() >= Ra_)
     {
+      n_duplicate_or_outside++;
       continue;
     }
 
@@ -1174,6 +1193,7 @@ bool OctopusSearch::run(std::vector<Eigen::Vector3d>& result, std::vector<Eigen:
     }
     if (intervalIsNotZero == false)  // constraintxL>constraint_xU (or with other axes)
     {
+      n_no_velocity++;
       continue;
     }
 
@@ -1186,6 +1206,11 @@ bool OctopusSearch::run(std::vector<Eigen::Vector3d>& result, std::vector<Eigen:
     // already_exist = false;
     if (collides)
     {
+      n_collision++;
+      if ((*current_ptr).index == 3)
+      {
+        n_collision_first++;
+      }
       // Node* tmp = current_ptr;
       // while (tmp != NULL)
       // {
@@ -1251,6 +1276,13 @@ bool OctopusSearch::run(std::vector<Eigen::Vector3d>& result, std::vector<Eigen:
   goto exitloop;
 
 exitloop:
+
+  if (status != GOAL_REACHED)
+  {
+    std::cout << "[A*] goal not reached: " << n_popped << " nodes, " << n_collision << " in collision ("
+              << n_collision_first << " in the first interval), " << n_no_velocity << " without a feasible velocity, "
+              << n_duplicate_or_outside << " duplicate or outside the limits" << std::endl;
+  }
 
   // std::cout << "status= " << status << std::endl;
   // std::cout << "expanded_nodes_.size()= " << expanded_nodes_.size() << std::endl;

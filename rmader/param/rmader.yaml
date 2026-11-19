@@ -200,9 +200,13 @@ dyn_obstacles:
   prediction_growth: 0.2    # [m/s] predicted mode: growth rate of the box along the prediction
   velocity_window: 0.5      # [s] velocity = change of position over this long (robust to observation noise)
   velocity_filter_alpha: 0.6 # (0,1] weight of the newest velocity measurement
+  max_horizon: 4.0          # [s] longest plan while an observed obstacle is tracked (0.0 --> no limit). Boxes grow with plan duration
+  max_time_factor: 1.5      # upper limit on opt/factor_alloc(_close) while an observed obstacle is tracked. 0.0 --> no limit
+  stop_dwell: 1.5           # [s] a plan's end point must stay out of the obstacles' reach until this long after the plan ends
   planning_margin: 0.15     # [m] extra clearance while planning, so that the next observation does not invalidate the plan
   velocity_threshold: 0.05  # [m/s] slower tracks count as static in predicted mode and never trigger hover avoidance
   track_timeout: 5.0        # [s] forget an obstacle that has not been observed for this long
+  static_track_timeout: 0.0 # [s] same for obstacles reported with is_static. 0.0 --> never forget them
 
   heat:                     # dynamic-obstacle heat map for the A* guess (paper Section V; NLopt backend only)
     weight: 5.0             # [w_heat] edge cost = length + weight * heat. 0.0 disables it
@@ -214,9 +218,22 @@ dyn_obstacles:
     tau_ratio: 0.5          # [tau_ratio^d] predictions are discounted by exp(-t / (tau_ratio * prediction_horizon))
     num_samples: 15         # [M_tube] samples of the predicted path
     max: 50.0               # [H_max]
+    horizon: 0.0            # [s] horizon for the reach of the heat. 0.0 --> max_horizon + stop_dwell, which keeps the
+                            #     global path about as far from obstacles as a plan's end point has to be
+
+  global_path:              # grid A* that picks the subgoal (paper Section V-D). Hard: where obstacles are now.
+    enabled: true           # Soft: the heat map. Off --> aim straight at the goal as upstream does
+    resolution: 0.3         # [m]
+    window: 8.0             # [m] half-size of the search region around the robot (horizontal)
+    window_z: 2.0           # [m] same, vertical (unused in ground mode)
+
+  escape_when_engulfed: false # last resort, not in the paper: a stopped robot that finds itself inside an obstacle's
+                            # inflated box plans one move straight away against the obstacles' bodies only.
+                            # false --> it stays put until the obstacle leaves, as SANDO does
+  escape_dist: 1.5          # [m] length of that move
 
   hover_avoidance:          # from SANDO's released configuration, not the paper: move out of the way of an obstacle
-    enabled: false          # that approaches while stopped at the goal
+    enabled: false          # that approaches while stopped, at the goal or wherever the robot ran out of plan
     trigger_dist: 4.0       # [m] evade when its predicted path comes this close
     evasion_dist: 3.0       # [m] how far to move; the agent returns once the goal is clear
     is_2d: true             # keep the evasion in the horizontal plane

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 #include <stdlib.h>
@@ -114,6 +115,10 @@ Rmader::Rmader(mt::parameters par) : par_(par)
 
   separator_solver_ = new separator::Separator();
 
+  if (par_.dyn.heat_horizon <= 0.0 && par_.dyn.max_horizon > 0.0)
+  {
+    par_.dyn.heat_horizon = std::max(par_.dyn.prediction_horizon, par_.dyn.max_horizon + par_.dyn.stop_dwell);
+  }
   obs_tracker_.setParams(par_.dyn);
 }
 
@@ -346,7 +351,7 @@ mt::dynTrajCompiled Rmader::compileObservedTrack(const dynobs::Track& track, dou
   traj.is_observed = true;
   traj.track = track;
   // With only a speed bound to go by, a track that looks parked may start moving: it is never static.
-  traj.is_static = (par_.dyn.mode == dynobs::Mode::PREDICTED) && !track.is_dynamic;
+  traj.is_static = track.declared_static || ((par_.dyn.mode == dynobs::Mode::PREDICTED) && !track.is_dynamic);
   return traj;
 }
 
@@ -410,6 +415,211 @@ bool Rmader::hasObservedObstacles()
   bool result = !obs_tracker_.tracks().empty();
   mtx_trajs_.unlock();
   return result;
+}
+
+// Radius of the planning sphere while observed obstacles are tracked, see Params::max_horizon.
+double Rmader::observedObstacleHorizon()
+{
+  if (!par_.dyn.enabled || par_.dyn.max_horizon <= 0.0 || !hasObservedObstacles())
+  {
+    return std::numeric_limits<double>::max();
+  }
+  return std::max(par_.v_max.maxCoeff() * par_.dyn.max_horizon, 3.0 * par_.goal_radius);
+}
+
+// Plan duration = this factor times the minimum time of a double integrator.
+double Rmader::timeAllocationFactor(double dist_to_terminal_goal)
+{
+  double factor = (dist_to_terminal_goal > par_.dist_factor_alloc_close) ? par_.factor_alloc : par_.factor_alloc_close;
+  if (par_.dyn.enabled && par_.dyn.max_time_factor > 0.0 && hasObservedObstacles())
+  {
+    factor = std::min(factor, std::max(1.0, par_.dyn.max_time_factor));
+  }
+  return factor;
+}
+
+// SANDO's global step (paper Section V): rather than aiming straight at the terminal goal, aim along a path
+// that goes around where the observed obstacles are now and prefers to stay off where they may go. G is the
+// point `ra` along that path, walked back until it is outside every box the obstacles can reach by the time
+// the plan ends (the paper's safe-subgoal idea, Section IV-C, applied to tracked obstacles).
+Rmader::Subgoal Rmader::subgoalAroundObservedObstacles(const mt::state& A, const mt::state& G_term, double ra,
+                                                       double t_start, Eigen::Vector3d& G)
+{
+  if (!par_.dyn.enabled || !par_.dyn.global_path_enabled || ra <= 0.0)
+  {
+    return Subgoal::UNCHANGED;
+  }
+  const std::vector<dynobs::Track> tracks = getObservedTracks();
+  if (tracks.empty())
+  {
+    return Subgoal::UNCHANGED;
+  }
+
+  dynobs::GlobalPathRequest request;
+  request.start = A.pos;
+  request.goal = G_term.pos;
+  request.lower << par_.x_min, par_.y_min, par_.z_min;
+  request.upper << par_.x_max, par_.y_max, par_.z_max;
+  request.agent_half_size = par_.drone_bbox / 2.0;
+  request.planar = par_.ground_robot;
+
+  std::vector<Eigen::Vector3d> path;
+  if (!dynobs::planGlobalPath(request, tracks, par_.dyn, path))
+  {
+    return Subgoal::UNCHANGED;
+  }
+
+  const double factor_alloc = timeAllocationFactor((G_term.pos - A.pos).norm());
+  const Eigen::Vector3d clearance =
+      par_.drone_bbox / 2.0 + (par_.beta + par_.alpha + par_.dyn.planning_margin) * Eigen::Vector3d::Ones();
+  const double step = par_.dyn.global_resolution;
+
+  for (double s = std::min(ra, dynobs::pathLength(path)); s > 0.5 * step; s -= step)
+  {
+    const Eigen::Vector3d candidate = dynobs::pointAlongPath(path, s);
+    const double duration = factor_alloc * mu::getMinTimeDoubleIntegrator3D(A.pos, A.vel, candidate,
+                                                                            Eigen::Vector3d::Zero(), par_.v_max,
+                                                                            par_.a_max);
+    const double t_end = t_start + duration;
+    const double dwell = std::max(duration / par_.num_pol, par_.dyn.stop_dwell);
+    bool is_free = true;
+    for (const dynobs::Track& track : tracks)
+    {
+      if (dynobs::occupancyBox(track, t_end, t_end + dwell, par_.dyn, clearance).contains(candidate))
+      {
+        is_free = false;
+        break;
+      }
+    }
+    if (is_free)
+    {
+      G = candidate;
+      return Subgoal::FOUND;
+    }
+  }
+  // Every point ahead can be reached by some obstacle before the robot could have stopped there and stood
+  // for stop_dwell. Creeping forward anyway is how a robot ends up parked among the obstacles.
+  return Subgoal::NONE_SAFE;
+}
+
+// Stopped somewhere other than the goal (the committed plan ran out and replanning has not produced a new
+// one) with an observed obstacle closing in: head out of its path first. Same rule as the evasion at the
+// goal, applied to this plan's subgoal instead of the terminal goal.
+bool Rmader::evasionSubgoal(const mt::state& A, double ra, Eigen::Vector3d& G)
+{
+  if (!par_.dyn.enabled || !par_.dyn.hover_avoidance_enabled)
+  {
+    return false;
+  }
+  if (A.vel.norm() > 0.05 || state_.vel.norm() > 0.05 || (A.pos - state_.pos).norm() > 0.2)
+  {
+    return false;  // still moving, or still has plan left to execute
+  }
+  Eigen::Vector3d away;
+  if (!dynobs::hoverEvasionGoal(A.pos, ros::Time::now().toSec(), getObservedTracks(), par_.dyn, away))
+  {
+    return false;
+  }
+  // No further than one planning horizon, and inside the arena.
+  const double reach = std::min(par_.dyn.hover_evasion_dist, std::min(par_.Ra, observedObstacleHorizon()));
+  away = A.pos + reach * (away - A.pos).normalized();
+  away.x() = std::min(std::max(away.x(), par_.x_min), par_.x_max);
+  away.y() = std::min(std::max(away.y(), par_.y_min), par_.y_max);
+  away.z() = std::min(std::max(away.z(), par_.z_min), par_.z_max);
+  if ((away - A.pos).norm() < par_.goal_radius)
+  {
+    return false;  // cornered against the arena limits
+  }
+  G = away;
+  ROS_INFO_STREAM_THROTTLE(1.0, "Observed obstacle closing in while stopped: stepping aside to " << G.transpose());
+  return true;
+}
+
+// See Params::escape_when_engulfed. Returns true (and sets observed_escape_ and G) if the start of this plan
+// is inside the box some observed obstacle gets for the plan's first time slice.
+bool Rmader::escapeSubgoal(const mt::state& A, const Eigen::Vector3d& G_straight, double t_start, Eigen::Vector3d& G)
+{
+  observed_escape_ = false;
+  if (!par_.dyn.enabled || !par_.dyn.escape_when_engulfed || A.vel.norm() > 0.05 || state_.vel.norm() > 0.05)
+  {
+    return false;
+  }
+
+  const double duration = mu::getMinTimeDoubleIntegrator3D(A.pos, A.vel, G_straight, Eigen::Vector3d::Zero(),
+                                                          par_.v_max, par_.a_max);
+  const Eigen::Vector3d clearance =
+      par_.drone_bbox / 2.0 + (par_.beta + par_.alpha + par_.dyn.planning_margin) * Eigen::Vector3d::Ones();
+
+  Eigen::Vector3d away = Eigen::Vector3d::Zero();
+  Eigen::Vector3d sidestep = Eigen::Vector3d::UnitX();
+  bool engulfed = false;
+  for (const dynobs::Track& track : getObservedTracks())
+  {
+    if (!dynobs::occupancyBox(track, t_start, t_start + duration / par_.num_pol, par_.dyn, clearance).contains(A.pos))
+    {
+      continue;
+    }
+    if (!engulfed && track.vel.head<2>().norm() > 1e-6)
+    {
+      sidestep = Eigen::Vector3d(-track.vel.y(), track.vel.x(), 0.0).normalized();
+    }
+    engulfed = true;
+    Eigen::Vector3d from_obstacle = A.pos - track.pos;
+    if (par_.ground_robot || par_.dyn.hover_avoidance_2d)
+    {
+      from_obstacle.z() = 0.0;
+    }
+    if (from_obstacle.norm() > 1e-6)
+    {
+      away += from_obstacle.normalized() / std::max(from_obstacle.norm(), 0.1);
+    }
+  }
+  if (!engulfed)
+  {
+    return false;
+  }
+
+  const Eigen::Vector3d direction = (away.norm() > 1e-3) ? away.normalized() : sidestep;
+  Eigen::Vector3d target = A.pos + par_.dyn.escape_dist * direction;
+  target.x() = std::min(std::max(target.x(), par_.x_min), par_.x_max);
+  target.y() = std::min(std::max(target.y(), par_.y_min), par_.y_max);
+  target.z() = std::min(std::max(target.z(), par_.z_min), par_.z_max);
+  if ((target - A.pos).norm() < par_.goal_radius)
+  {
+    return false;  // cornered
+  }
+  G = target;
+  observed_escape_ = true;
+  ROS_WARN_STREAM_THROTTLE(1.0, "Standing inside an observed obstacle's box: escaping to " << G.transpose()
+                                    << " against the obstacles' bodies only");
+  return true;
+}
+
+// A stopped rover cannot leave towards a point outside its heading cone, and the optimiser would just keep
+// failing. Ask whatever tracks the setpoints to turn it on the spot (setpoint yaw, zero velocity) and plan
+// once it faces the right way. The simulator bridge does the same before sending a goal behind the rover;
+// this covers subgoals the planner picks itself.
+bool Rmader::groundTurnNeeded(const mt::state& A, const mt::state& G)
+{
+  if (!par_.ground_robot)
+  {
+    return false;
+  }
+  const Eigen::Vector2d to_goal = (G.pos - A.pos).head<2>();
+  const bool stopped = A.vel.head<2>().norm() < 0.05 && state_.vel.head<2>().norm() < 0.05;
+  if (!stopped || to_goal.norm() < 1e-3)
+  {
+    ground_turn_requested_ = false;
+    return false;
+  }
+  const double wanted = std::atan2(to_goal.y(), to_goal.x());
+  double error = wanted - state_.yaw;
+  mu::angle_wrap(error);
+  // Hysteresis: start turning when most of the cone is used up, stop once well inside it.
+  const double limit = (ground_turn_requested_ ? 0.4 : 0.8) * par_.ground_heading_cone_rad;
+  ground_turn_requested_ = std::fabs(error) > limit;
+  ground_turn_yaw_ = wanted;
+  return ground_turn_requested_;
 }
 
 bool Rmader::isEvading()
@@ -588,6 +798,18 @@ std::vector<Eigen::Vector3d> Rmader::vertexesOfInterval(mt::dynTrajCompiled& tra
 {
   Eigen::Vector3d delta = Eigen::Vector3d::Zero();
   Eigen::Vector3d drone_boundarybox = par_.drone_bbox;
+
+  if (traj.is_observed && observed_escape_)
+  {
+    // Params::escape_when_engulfed: the obstacle's body as last seen, the agent's size and the observation
+    // error. Nothing else.
+    dynobs::Box body;
+    Eigen::Vector3d half = traj.track.bbox / 2.0 + drone_boundarybox / 2.0 +
+                           par_.dyn.obst_position_error * Eigen::Vector3d::Ones();
+    body.lo = traj.track.pos - half;
+    body.hi = traj.track.pos + half;
+    return body.vertexes();
+  }
 
   if (traj.is_observed)
   {
@@ -854,7 +1076,13 @@ ConvexHullsOfCurve Rmader::convexHullsOfCurve(mt::dynTrajCompiled& traj, double 
 
   for (int i = 0; i <= par_.num_pol; i++)
   {
-    convexHulls.push_back(convexHullOfInterval(traj, t_start + i * deltaT, t_start + (i + 1) * deltaT));
+    double t_b = t_start + (i + 1) * deltaT;
+    if (traj.is_observed && i == par_.num_pol)
+    {
+      // The interval after the plan ends, when the robot is at rest at its end point: see Params::stop_dwell
+      t_b = t_start + i * deltaT + std::max(deltaT, par_.dyn.stop_dwell);
+    }
+    convexHulls.push_back(convexHullOfInterval(traj, t_start + i * deltaT, t_b));
   }
 
   return convexHulls;
@@ -1572,8 +1800,18 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
 
   double distA2TermGoal = (G_term.pos - A.pos).norm();
   double ra = std::min((distA2TermGoal - 0.001), par_.Ra);  // radius of the sphere S
+  ra = std::min(ra, observedObstacleHorizon());
   mt::state G;
   G.pos = A.pos + ra * (G_term.pos - A.pos).normalized();
+  const Subgoal subgoal =
+      subgoalAroundObservedObstacles(A, G_term, ra, k_index * par_.dc + ros::Time::now().toSec(), G.pos);
+  const bool stepping_aside = evasionSubgoal(A, ra, G.pos);
+  const bool escaping = escapeSubgoal(A, G.pos, k_index * par_.dc + ros::Time::now().toSec(), G.pos);
+  if (subgoal == Subgoal::NONE_SAFE && !stepping_aside && !escaping)
+  {
+    ROS_INFO_STREAM_THROTTLE(1.0, "No point ahead is safe to stop at yet: keeping the committed plan");
+    return false;
+  }
 
   // detoured G
 
@@ -1637,6 +1875,10 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
     // is the heading that the new path must continue; at a stop use the rover.
     initial.yaw = initial.vel.head<2>().norm() > 0.05
                       ? std::atan2(initial.vel.y(), initial.vel.x()) : state_.yaw;
+    if (groundTurnNeeded(A, G))
+    {
+      return false;  // turning on the spot first, see getDesiredYaw
+    }
   }
   if (is_movingAoutOfBbox_)
   {
@@ -1661,7 +1903,7 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
 
   double t_start = k_index * par_.dc + time_now_;
 
-  double factor_alloc = (distA2TermGoal > par_.dist_factor_alloc_close) ? par_.factor_alloc : par_.factor_alloc_close;
+  double factor_alloc = timeAllocationFactor(distA2TermGoal);
 
   double time_allocated = factor_alloc * mu::getMinTimeDoubleIntegrator3D(initial.pos, initial.vel, final.pos,
                                                                           final.vel, par_.v_max, par_.a_max);
@@ -2158,8 +2400,18 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
 
   double distA2TermGoal = (G_term.pos - A.pos).norm();
   double ra = std::min((distA2TermGoal - 0.001), par_.Ra);  // radius of the sphere S
+  ra = std::min(ra, observedObstacleHorizon());
   mt::state G;
   G.pos = A.pos + ra * (G_term.pos - A.pos).normalized();
+  const Subgoal subgoal =
+      subgoalAroundObservedObstacles(A, G_term, ra, k_index * par_.dc + ros::Time::now().toSec(), G.pos);
+  const bool stepping_aside = evasionSubgoal(A, ra, G.pos);
+  const bool escaping = escapeSubgoal(A, G.pos, k_index * par_.dc + ros::Time::now().toSec(), G.pos);
+  if (subgoal == Subgoal::NONE_SAFE && !stepping_aside && !escaping)
+  {
+    ROS_INFO_STREAM_THROTTLE(1.0, "No point ahead is safe to stop at yet: keeping the committed plan");
+    return false;
+  }
 
   // Eigen::Vector3d dist_prog(1e5, 1e5, 1e5);
   // Eigen::Vector3d dist_to_goal(1e5, 1e5, 1e5);
@@ -2219,6 +2471,10 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
   {
     initial.yaw = initial.vel.head<2>().norm() > 0.05
                       ? std::atan2(initial.vel.y(), initial.vel.x()) : state_.yaw;
+    if (groundTurnNeeded(A, G))
+    {
+      return false;  // turning on the spot first, see getDesiredYaw
+    }
   }
   mt::state final = G;
 
@@ -2237,7 +2493,7 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
 
   double t_start = k_index * par_.dc + time_now;
 
-  double factor_alloc = (distA2TermGoal > par_.dist_factor_alloc_close) ? par_.factor_alloc : par_.factor_alloc_close;
+  double factor_alloc = timeAllocationFactor(distA2TermGoal);
 
   double time_allocated = factor_alloc * mu::getMinTimeDoubleIntegrator3D(initial.pos, initial.vel, final.pos,
                                                                           final.vel, par_.v_max, par_.a_max);
@@ -2514,8 +2770,8 @@ void Rmader::getDesiredYaw(mt::state& next_goal)
 {
   if (par_.ground_robot)
   {
-    next_goal.yaw = next_goal.vel.head<2>().norm() > 0.05
-                        ? std::atan2(next_goal.vel.y(), next_goal.vel.x()) : state_.yaw;
+    next_goal.yaw = next_goal.vel.head<2>().norm() > 0.05 ? std::atan2(next_goal.vel.y(), next_goal.vel.x()) :
+                                                             (ground_turn_requested_ ? ground_turn_yaw_ : state_.yaw);
     next_goal.dyaw = 0.0;
     return;
   }

@@ -1,0 +1,65 @@
+<launch>
+  <!-- One planner for the observed-obstacle tests. Included by observed_obstacles*.launch. -->
+  <arg name="ns"/>
+  <arg name="agents_ids" default="[1, 2]"/>
+  <arg name="ground" default="false"/>
+  <arg name="dyn_enabled" default="true"/>
+  <arg name="dyn_mode" default="reachable"/>
+  <arg name="obst_max_vel" default="0.5"/>
+  <arg name="hover_avoidance" default="false"/>
+  <arg name="heat_weight" default="5.0"/>
+  <arg name="max_horizon" default="4.0"/>
+  <arg name="heat_horizon" default="0.0"/>
+  <arg name="evade_trigger" default="1.5"/>
+  <arg name="escape" default="false"/>
+  <arg name="stop_dwell" default="1.5"/>
+
+  <group ns="$(arg ns)">
+    <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
+      <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
+      <rosparam param="agents_ids" subst_value="true">$(arg agents_ids)</rosparam>
+      <param name="visual/is_visual" value="false"/>
+      <param name="is_replan_after_goal_reached" value="true"/>
+      <param name="tuning_param/delay_check_sec" value="0.05"/>
+      <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
+
+      <!-- Aerial: same limits as tests/two_agent.launch -->
+      <rosparam unless="$(arg ground)" param="tuning_param/v_max">[2.0, 2.0, 2.0]</rosparam>
+      <rosparam unless="$(arg ground)" param="tuning_param/a_max">[4.0, 4.0, 4.0]</rosparam>
+      <rosparam unless="$(arg ground)" param="tuning_param/j_max">[8.0, 8.0, 8.0]</rosparam>
+      <rosparam unless="$(arg ground)" param="tuning_param/drone_bbox">[0.35, 0.35, 0.35]</rosparam>
+      <param unless="$(arg ground)" name="tuning_param/Ra" value="6.0"/>
+
+      <!-- Ground: same limits as integration/rover_sim.launch -->
+      <param if="$(arg ground)" name="space_size" value="ground_space"/>
+      <param if="$(arg ground)" name="ground_robot/enabled" value="true"/>
+      <param if="$(arg ground)" name="ground_robot/max_yaw_rate" value="0.8"/>
+      <param if="$(arg ground)" name="ground_robot/heading_cone_rad" value="0.5"/>
+      <rosparam if="$(arg ground)" param="ground_space">{x_min: -7.5, x_max: 7.5, y_min: -7.5, y_max: 7.5, z_min: -0.1, z_max: 0.1}</rosparam>
+      <rosparam if="$(arg ground)" param="tuning_param/v_max">[0.55, 0.55, 0.01]</rosparam>
+      <rosparam if="$(arg ground)" param="tuning_param/a_max">[0.5, 0.5, 0.01]</rosparam>
+      <rosparam if="$(arg ground)" param="tuning_param/j_max">[1.0, 1.0, 0.02]</rosparam>
+      <rosparam if="$(arg ground)" param="tuning_param/drone_bbox">[0.7, 0.7, 0.4]</rosparam>
+      <param if="$(arg ground)" name="tuning_param/Ra" value="8.0"/>
+      <param if="$(arg ground)" name="opt/a_star_samp_z" value="1"/>
+      <param if="$(arg ground)" name="setting/goal_radius" value="0.4"/>
+
+      <param name="dyn_obstacles/enabled" value="$(arg dyn_enabled)"/>
+      <param name="dyn_obstacles/mode" value="$(arg dyn_mode)"/>
+      <param name="dyn_obstacles/obst_max_vel" value="$(arg obst_max_vel)"/>
+      <param name="dyn_obstacles/obst_position_error" value="0.03"/>
+      <param name="dyn_obstacles/heat/weight" value="$(arg heat_weight)"/>
+      <param name="dyn_obstacles/max_horizon" value="$(arg max_horizon)"/>
+      <param name="dyn_obstacles/heat/horizon" value="$(arg heat_horizon)"/>
+      <param name="dyn_obstacles/hover_avoidance/enabled" value="$(arg hover_avoidance)"/>
+      <param name="dyn_obstacles/escape_when_engulfed" value="$(arg escape)"/>
+      <param name="dyn_obstacles/stop_dwell" value="$(arg stop_dwell)"/>
+      <param name="dyn_obstacles/hover_avoidance/trigger_dist" value="$(arg evade_trigger)"/>
+      <param name="dyn_obstacles/hover_avoidance/evasion_dist" value="2.5"/>
+
+      <remap from="~state" to="/$(arg ns)/state"/>
+      <remap from="~term_goal" to="/$(arg ns)/term_goal"/>
+      <remap from="~goal" to="/$(arg ns)/goal"/>
+    </node>
+  </group>
+</launch>

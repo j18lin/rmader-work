@@ -70,9 +70,23 @@ void testTracker()
   tracker.update(with_vel);
   check(tracker.get(8, track) && (track.vel - with_vel.vel).norm() < 1e-12, "reported velocity is used");
 
+  // An obstacle declared static never grows, in either mode, and is not forgotten.
+  dynobs::Observation wall = observation(9, 11.0, Eigen::Vector3d(-4, 0, 1));
+  wall.is_static = true;
+  tracker.update(wall);
+  check(tracker.get(9, track) && track.declared_static && track.max_vel == 0.0, "declared-static track has no speed");
+  for (dynobs::Mode mode : { dynobs::Mode::REACHABLE, dynobs::Mode::PREDICTED })
+  {
+    dynobs::Params static_par = par;
+    static_par.mode = mode;
+    const dynobs::Box box = dynobs::centerBox(track, 11.0, 60.0, static_par);
+    check((box.hi - box.lo).norm() < 1e-12, "declared-static obstacle does not grow");
+  }
+
   check(tracker.prune(12.5).empty(), "fresh tracks survive pruning");
   const std::vector<int> removed = tracker.prune(13.5);
-  check(removed.size() == 2 && tracker.tracks().empty(), "stale tracks are dropped");
+  check(removed.size() == 2 && tracker.tracks().size() == 1 && tracker.tracks()[0].id == 9,
+        "stale tracks are dropped, static ones are kept");
 }
 
 // Differencing consecutive 20 Hz observations with 3 cm of noise would give velocity errors of the order of
@@ -283,6 +297,77 @@ void testHeat()
   check(dynobs::heat(Eigen::Vector3d(0.6, 0, 0), still.tracks(), par) > 0.0, "a parked obstacle still has heat");
 }
 
+// Section V-D of the paper: grid A*, hard only where an obstacle is now, soft heat for where it may go.
+void testGlobalPath()
+{
+  dynobs::Params par;
+  par.velocity_filter_alpha = 1.0;
+  par.global_resolution = 0.25;
+  par.global_window = 6.0;
+
+  dynobs::GlobalPathRequest request;
+  request.start = Eigen::Vector3d(0, 0, 1);
+  request.goal = Eigen::Vector3d(4, 0, 1);
+  request.agent_half_size = Eigen::Vector3d::Constant(0.2);
+  request.planar = true;
+
+  std::vector<Eigen::Vector3d> path;
+  check(dynobs::planGlobalPath(request, {}, par, path), "a path exists in empty space");
+  check(std::fabs(dynobs::pathLength(path) - 4.0) < 1e-6, "with nothing in the way the path is straight");
+  check((path.front() - request.start).norm() < 1e-12 && (path.back() - request.goal).norm() < 1e-9,
+        "path runs from the start to the goal");
+  check((dynobs::pointAlongPath(path, 1.3) - Eigen::Vector3d(1.3, 0, 1)).norm() < 1e-9, "point along the path");
+  check((dynobs::pointAlongPath(path, 99.0) - path.back()).norm() < 1e-12, "past the end is the end");
+
+  // An obstacle parked on the straight line: the path has to leave the line and stay out of its box.
+  dynobs::Tracker parked(par);
+  parked.update(observation(1, 0.0, Eigen::Vector3d(2, 0, 1)));
+  parked.update(observation(1, 1.0, Eigen::Vector3d(2, 0, 1)));
+  check(dynobs::planGlobalPath(request, parked.tracks(), par, path), "a path exists around a parked obstacle");
+  check(dynobs::pathLength(path) > 4.2, "the path goes around");
+  const double reach = 0.2 + 0.2 + par.base_inflation + par.obst_position_error;  // obstacle + agent + margin
+  bool clear = true, planar = true;
+  for (const Eigen::Vector3d& p : path)
+  {
+    clear = clear && ((p - Eigen::Vector3d(2, 0, 1)).cwiseAbs().head<2>().maxCoeff() > reach);
+    planar = planar && std::fabs(p.z() - 1.0) < 1e-12;
+  }
+  check(clear, "the path stays out of the obstacle's current box");
+  check(planar, "a planar search keeps the height");
+
+  // The same obstacle, now crossing the line towards +y: the heat of its predicted path makes passing
+  // behind it (y < 0) cheaper than cutting in front of it.
+  dynobs::Tracker crossing(par);
+  crossing.update(observation(1, 0.0, Eigen::Vector3d(2, -0.5, 1)));
+  crossing.update(observation(1, 1.0, Eigen::Vector3d(2, 0.0, 1)));
+  check(dynobs::planGlobalPath(request, crossing.tracks(), par, path), "a path exists around a moving obstacle");
+  double extreme_y = 0.0;
+  for (const Eigen::Vector3d& p : path)
+  {
+    extreme_y = (std::fabs(p.y()) > std::fabs(extreme_y)) ? p.y() : extreme_y;
+  }
+  check(extreme_y < 0.0, "the path passes behind a crossing obstacle");
+
+  // Without the heat there is no reason to prefer either side... but with a 3D search it may go over.
+  request.planar = false;
+  check(dynobs::planGlobalPath(request, parked.tracks(), par, path), "a 3D path exists");
+
+  // A goal outside the window is clamped to its edge, and the arena limits are respected.
+  request.planar = true;
+  request.goal = Eigen::Vector3d(50, 0, 1);
+  request.upper = Eigen::Vector3d(3.0, 10, 10);
+  check(dynobs::planGlobalPath(request, {}, par, path), "a path exists towards a far goal");
+  check(std::fabs(path.back().x() - 3.0) < 1e-9, "the path stops at the edge of the allowed region");
+
+  // The start is never blocked, even with an obstacle on top of it.
+  dynobs::Tracker on_top(par);
+  on_top.update(observation(1, 0.0, Eigen::Vector3d(0.1, 0, 1)));
+  on_top.update(observation(1, 1.0, Eigen::Vector3d(0.1, 0, 1)));
+  request.goal = Eigen::Vector3d(-3, 0, 1);
+  request.upper = Eigen::Vector3d::Constant(1e9);
+  check(dynobs::planGlobalPath(request, on_top.tracks(), par, path), "a path exists out of a blocked start");
+}
+
 void testHoverEvasion()
 {
   dynobs::Params par;
@@ -328,6 +413,7 @@ int main()
   testReachableBoxContainsAnyBoundedMotion();
   testBoxes();
   testHeat();
+  testGlobalPath();
   testHoverEvasion();
   testModeNames();
 

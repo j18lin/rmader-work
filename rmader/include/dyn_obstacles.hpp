@@ -66,6 +66,22 @@ struct Params
   double velocity_filter_alpha = 0.6;  // \in (0,1], weight of the newest velocity measurement
   double velocity_threshold = 0.05;    // [m/s] slower tracks are treated as static (no growth). 0 = never static
   double track_timeout = 5.0;          // [s] drop a track that has not been observed for this long
+  double static_track_timeout = 0.0;   // [s] same for obstacles declared static. 0: keep them for good
+
+  // Longest plan [s] while any observed obstacle is tracked (0 = no limit). The boxes grow with the plan's
+  // duration, so a long plan is a wall of boxes; SANDO likewise plans a short horizon and replans. The goal
+  // of each plan is pulled in to about v_max * max_horizon from its start.
+  double max_horizon = 4.0;
+
+  // Upper limit on the planner's time-allocation factor while an observed obstacle is tracked. Upstream
+  // stretches plans to factor_alloc_close (2.5) times their minimum duration near the goal; box growth is
+  // proportional to plan duration, so that makes every box near the goal 2.5 times larger. SANDO searches
+  // factors from 1.0 upwards and takes the first that works.
+  double max_time_factor = 1.5;
+
+  // Every plan ends at rest. Its end point is chosen outside everything the obstacles can reach until this
+  // long after the plan ends, so that a robot whose next replans fail is not hit the moment it stops.
+  double stop_dwell = 1.5;  // [s]
 
   // Extra clearance used only while *planning*. Every new observation moves the boxes a little, so a
   // trajectory planned flush against them would fail the checks that follow (delay check, next replan).
@@ -82,8 +98,29 @@ struct Params
   double heat_tau_ratio = 0.5;     // tau_ratio^d: time weight exp(-t / (tau_ratio * prediction_horizon))
   int heat_num_samples = 15;       // M_tube: samples of the predicted path
   double heat_max = 50.0;          // H_max
+  // Horizon used for the reach of the heat (R^d = R_0 + v_max * horizon) and the length of the tube.
+  // 0: prediction_horizon. The planner sets it to max_horizon + stop_dwell when it is left at 0, so that the
+  // global path keeps about as far from the obstacles as a plan's end point has to (see stop_dwell);
+  // otherwise the path hugs them and no point along it ever qualifies as a subgoal.
+  double heat_horizon = 0.0;
 
-  // Evasion while stopped at the goal.
+  // Global path (paper Section V-D): grid A* from the plan's start to the terminal goal. Only the obstacles'
+  // *current* boxes are hard; everything about their future is the soft heat above. The planner aims at the
+  // point max_horizon along this path instead of straight at the goal, so it can go around a blocked region.
+  bool global_path_enabled = true;
+  double global_resolution = 0.3;       // [m] grid size
+  double global_window = 8.0;           // [m] half-size of the search region around the start (horizontal)
+  double global_window_z = 2.0;         // [m] same, vertical (ignored for a planar search)
+  int global_max_expansions = 40000;
+
+  // Last resort, not in the paper. A robot that is standing still can end up inside an obstacle's inflated
+  // box (the obstacle came to it). From there no plan satisfies the constraints, so SANDO-style it would sit
+  // until hit or until the obstacle leaves. With this on, that one plan is made against the obstacles'
+  // bodies only (no growth, no margins) and heads straight away from them. No guarantee while it lasts.
+  bool escape_when_engulfed = false;
+  double escape_dist = 1.5;  // [m] how far such a plan goes
+
+  // Evasion while stopped: at the goal, or anywhere the robot ran out of plan.
   bool hover_avoidance_enabled = false;
   double hover_trigger_dist = 4.0;        // [m] evade when a moving obstacle is predicted to come this close
   double hover_evasion_dist = 3.0;        // [m] how far to move away
@@ -99,6 +136,7 @@ struct Observation
   Eigen::Vector3d vel = Eigen::Vector3d::Zero();
   bool has_vel = false;  // false: the tracker estimates the velocity from consecutive positions
   Eigen::Vector3d bbox = Eigen::Vector3d::Zero();  // full size (hx, hy, hz) of the obstacle
+  bool is_static = false;  // the source knows this obstacle does not move: no growth, no heat tube, no timeout
 };
 
 struct Track
@@ -110,6 +148,7 @@ struct Track
   Eigen::Vector3d bbox = Eigen::Vector3d::Zero();
   double max_vel = 0.0;  // speed bound used for this track (>= Params::obst_max_vel, see Tracker::update)
   bool is_dynamic = false;
+  bool declared_static = false;  // from Observation::is_static; max_vel is 0 then
   int num_observations = 0;
   // Recent (stamp, position) pairs, oldest first, spanning at most Params::velocity_window.
   std::deque<std::pair<double, Eigen::Vector3d>> history;
@@ -182,6 +221,29 @@ private:
 // Dynamic-obstacle heat H^d(q) of the paper's Section V-B, capped at heat_max: per obstacle a base term
 // around its current position plus a time-weighted tube around its predicted path, maximum over obstacles.
 double heat(const Eigen::Vector3d& q, const std::vector<Track>& tracks, const Params& par);
+
+struct GlobalPathRequest
+{
+  Eigen::Vector3d start = Eigen::Vector3d::Zero();
+  Eigen::Vector3d goal = Eigen::Vector3d::Zero();
+  // Region the path has to stay in (e.g. the arena limits). The search window is clipped to it.
+  Eigen::Vector3d lower = Eigen::Vector3d::Constant(-1e9);
+  Eigen::Vector3d upper = Eigen::Vector3d::Constant(1e9);
+  Eigen::Vector3d agent_half_size = Eigen::Vector3d::Zero();  // half the agent's bounding box
+  bool planar = false;                                        // true: search in the horizontal plane only
+};
+
+// Grid A* with the paper's edge cost c = d + heat_weight * H(q). A cell is blocked if the agent's box centred
+// on it would overlap an obstacle's current box (grown by base_inflation and obst_position_error). The goal
+// is clamped into the search window. If the start itself is blocked, the path may cross blocked cells until
+// it first reaches a free one. Returns false if no path was found; `path` then is empty.
+// On success `path` starts at request.start and ends at the cell nearest the (clamped) goal.
+bool planGlobalPath(const GlobalPathRequest& request, const std::vector<Track>& tracks, const Params& par,
+                    std::vector<Eigen::Vector3d>& path);
+
+// The point `arc_length` along a polyline from its first point (its last point if the polyline is shorter).
+Eigen::Vector3d pointAlongPath(const std::vector<Eigen::Vector3d>& path, double arc_length);
+double pathLength(const std::vector<Eigen::Vector3d>& path);
 
 // True if an agent stopped at `pos` should move away. `goal` is then where to go.
 bool hoverEvasionGoal(const Eigen::Vector3d& pos, double now, const std::vector<Track>& tracks, const Params& par,

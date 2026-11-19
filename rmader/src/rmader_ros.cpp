@@ -114,10 +114,14 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   nh1_.param("dyn_obstacles/prediction_horizon", par_.dyn.prediction_horizon, par_.dyn.prediction_horizon);
   nh1_.param("dyn_obstacles/prediction_growth", par_.dyn.prediction_growth, par_.dyn.prediction_growth);
   nh1_.param("dyn_obstacles/velocity_window", par_.dyn.velocity_window, par_.dyn.velocity_window);
+  nh1_.param("dyn_obstacles/max_horizon", par_.dyn.max_horizon, par_.dyn.max_horizon);
+  nh1_.param("dyn_obstacles/max_time_factor", par_.dyn.max_time_factor, par_.dyn.max_time_factor);
+  nh1_.param("dyn_obstacles/stop_dwell", par_.dyn.stop_dwell, par_.dyn.stop_dwell);
   nh1_.param("dyn_obstacles/planning_margin", par_.dyn.planning_margin, par_.dyn.planning_margin);
   nh1_.param("dyn_obstacles/velocity_filter_alpha", par_.dyn.velocity_filter_alpha, par_.dyn.velocity_filter_alpha);
   nh1_.param("dyn_obstacles/velocity_threshold", par_.dyn.velocity_threshold, par_.dyn.velocity_threshold);
   nh1_.param("dyn_obstacles/track_timeout", par_.dyn.track_timeout, par_.dyn.track_timeout);
+  nh1_.param("dyn_obstacles/static_track_timeout", par_.dyn.static_track_timeout, par_.dyn.static_track_timeout);
   nh1_.param("dyn_obstacles/heat/weight", par_.dyn.heat_weight, par_.dyn.heat_weight);
   nh1_.param("dyn_obstacles/heat/alpha_base", par_.dyn.heat_alpha_base, par_.dyn.heat_alpha_base);
   nh1_.param("dyn_obstacles/heat/alpha_tube", par_.dyn.heat_alpha_tube, par_.dyn.heat_alpha_tube);
@@ -127,6 +131,13 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   nh1_.param("dyn_obstacles/heat/tau_ratio", par_.dyn.heat_tau_ratio, par_.dyn.heat_tau_ratio);
   nh1_.param("dyn_obstacles/heat/num_samples", par_.dyn.heat_num_samples, par_.dyn.heat_num_samples);
   nh1_.param("dyn_obstacles/heat/max", par_.dyn.heat_max, par_.dyn.heat_max);
+  nh1_.param("dyn_obstacles/heat/horizon", par_.dyn.heat_horizon, par_.dyn.heat_horizon);
+  nh1_.param("dyn_obstacles/global_path/enabled", par_.dyn.global_path_enabled, par_.dyn.global_path_enabled);
+  nh1_.param("dyn_obstacles/global_path/resolution", par_.dyn.global_resolution, par_.dyn.global_resolution);
+  nh1_.param("dyn_obstacles/global_path/window", par_.dyn.global_window, par_.dyn.global_window);
+  nh1_.param("dyn_obstacles/global_path/window_z", par_.dyn.global_window_z, par_.dyn.global_window_z);
+  nh1_.param("dyn_obstacles/escape_when_engulfed", par_.dyn.escape_when_engulfed, false);
+  nh1_.param("dyn_obstacles/escape_dist", par_.dyn.escape_dist, par_.dyn.escape_dist);
   nh1_.param("dyn_obstacles/hover_avoidance/enabled", par_.dyn.hover_avoidance_enabled, false);
   nh1_.param("dyn_obstacles/hover_avoidance/trigger_dist", par_.dyn.hover_trigger_dist, par_.dyn.hover_trigger_dist);
   nh1_.param("dyn_obstacles/hover_avoidance/evasion_dist", par_.dyn.hover_evasion_dist, par_.dyn.hover_evasion_dist);
@@ -135,9 +146,10 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
       par_.dyn.obst_position_error < 0.0 || par_.dyn.base_inflation < 0.0 || par_.dyn.prediction_horizon < 0.0 ||
       par_.dyn.prediction_growth < 0.0 || par_.dyn.velocity_filter_alpha <= 0.0 ||
       par_.dyn.velocity_filter_alpha > 1.0 || par_.dyn.track_timeout <= 0.0 || par_.dyn.heat_weight < 0.0 || par_.dyn.heat_tau_ratio < 0.0 ||
-      par_.dyn.heat_num_samples < 1 || par_.dyn.heat_max < 0.0 ||
-      par_.dyn.velocity_window < 0.0 || par_.dyn.planning_margin < 0.0 ||
-      par_.dyn.hover_evasion_dist <= 0.0)
+      par_.dyn.heat_num_samples < 1 || par_.dyn.heat_max < 0.0 || par_.dyn.heat_horizon < 0.0 ||
+      par_.dyn.global_resolution <= 0.0 || par_.dyn.global_window <= 0.0 || par_.dyn.global_window_z < 0.0 ||
+      par_.dyn.velocity_window < 0.0 || par_.dyn.planning_margin < 0.0 || par_.dyn.max_horizon < 0.0 || par_.dyn.stop_dwell < 0.0 ||
+      par_.dyn.hover_evasion_dist <= 0.0 || par_.dyn.escape_dist <= 0.0)
   {
     ROS_FATAL("Invalid dyn_obstacles parameters (mode must be \"reachable\" or \"predicted\")");
     throw std::invalid_argument("dyn_obstacles parameters");
@@ -471,6 +483,7 @@ void RmaderRos::obstacleObservationCB(const rmader_msgs::ObstacleObservation& ms
   obs.vel << msg.vel.x, msg.vel.y, msg.vel.z;
   obs.has_vel = msg.has_vel;
   obs.bbox << msg.bbox.x, msg.bbox.y, msg.bbox.z;
+  obs.is_static = msg.is_static;
 
   if (obs.stamp <= 0.0)
   {

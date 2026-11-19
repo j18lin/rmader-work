@@ -42,7 +42,8 @@ fi
 docker run -d --name sim-rmader --network rover-sim \
   -v rmader_ugv_build:/ws -v "$rmader_repo:/ws/src/rmader_ugv:ro" \
   --entrypoint sleep rmader-ugv:noetic-build-deps infinity >/dev/null
-docker exec -d sim-rmader bash /ws/src/rmader_ugv/integration/run_ros1.sh
+docker exec -d -e RMADER_DYN_OBSTACLES="${RMADER_DYN_OBSTACLES:-0}" -e RMADER_OBST_MAX_VEL="${RMADER_OBST_MAX_VEL:-0.25}" \
+  sim-rmader bash /ws/src/rmader_ugv/integration/run_ros1.sh
 docker exec sim-drive bash -lc \
   "source /opt/ros/humble/setup.bash && source /home/swarm/code/rover_ws/install/setup.bash && python3 /rover_sim/scripts/rover_rmader_bridge.py --duration $duration --state-source $state_source --scenario $scenario --inject-jr81-dlio-jump-at $inject_jump_at"
 recording="/tmp/rover_sim-$(id -u)/run/rmader_recording.json"

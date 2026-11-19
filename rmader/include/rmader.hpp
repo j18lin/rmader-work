@@ -117,6 +117,20 @@ private:
   void setHeatCostForSolver();
   // ...and these take it themselves.
   bool hasObservedObstacles();
+  double observedObstacleHorizon();
+  double timeAllocationFactor(double dist_to_terminal_goal);
+  enum class Subgoal
+  {
+    UNCHANGED,  // nothing observed (or no global path): G stays upstream's point on the straight line
+    FOUND,      // G moved to a point along the global path that is safe to stop at
+    NONE_SAFE   // no point along the path is safe to stop at right now: better not to plan a move at all
+  };
+  Subgoal subgoalAroundObservedObstacles(const mt::state& A, const mt::state& G_term, double ra, double t_start,
+                                         Eigen::Vector3d& G);
+  bool evasionSubgoal(const mt::state& A, double ra, Eigen::Vector3d& G);
+  bool escapeSubgoal(const mt::state& A, const Eigen::Vector3d& G_straight, double t_start, Eigen::Vector3d& G);
+  // Ground mode: true if the rover is stopped and has to turn on the spot before it can head for G.
+  bool groundTurnNeeded(const mt::state& A, const mt::state& G);
 
   // Moves a stopped agent out of the way of an approaching observed obstacle, and back afterwards.
   void updateHoverAvoidance();
@@ -271,6 +285,11 @@ private:
   // Extra clearance around observed obstacles; non-zero only while building the hulls to plan against
   // (guarded by mtx_trajs_). The checks that follow use the boxes as they are.
   double observed_extra_margin_ = 0.0;
+  // True for a plan made under Params::escape_when_engulfed: observed obstacles count as their bodies only,
+  // in the hulls and in the checks of that plan. Set at the start of each replan.
+  bool observed_escape_ = false;
+  bool ground_turn_requested_ = false;  // a stopped rover is being turned on the spot towards ground_turn_yaw_
+  double ground_turn_yaw_ = 0.0;
   bool is_evading_ = false;      // true while the terminal goal is an evasion goal
   mt::state hover_home_;         // terminal goal to return to after evading
 };

@@ -12,6 +12,10 @@ for i in $(seq 1 50); do
   if rostopic list >/dev/null 2>&1; then break; fi
   sleep 0.2
 done
-roslaunch /ws/src/rmader_ugv/integration/rover_sim.launch >/ws/roslaunch.log 2>&1 &
+launch_args=()
+if test "${RMADER_DYN_OBSTACLES:-0}" = 1; then
+  launch_args+=(dyn_obstacles:=true "obst_max_vel:=${RMADER_OBST_MAX_VEL:-0.25}")
+fi
+roslaunch /ws/src/rmader_ugv/integration/rover_sim.launch "${launch_args[@]}" >/ws/roslaunch.log 2>&1 &
 launch_pid=$!
 python3 /ws/src/rmader_ugv/integration/ros1_bridge.py >/ws/bridge.log 2>&1

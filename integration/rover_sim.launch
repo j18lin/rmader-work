@@ -1,4 +1,9 @@
 <launch>
+  <!-- Obstacles the simulator side reports over the bridge as `obstacle` rows (see integration/ros1_bridge.py).
+       Off by default, in which case the planners behave exactly as before. The other values are the ones
+       the rover-speed tests in tests/observed_obstacles_test.py pass with. -->
+  <arg name="dyn_obstacles" default="false"/>
+  <arg name="obst_max_vel" default="0.25"/>
   <group ns="SQ81s">
     <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
       <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
@@ -19,6 +24,13 @@
       <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
       <param name="opt/a_star_samp_z" value="1"/>
       <param name="setting/goal_radius" value="0.4"/>
+      <param name="dyn_obstacles/enabled" value="$(arg dyn_obstacles)"/>
+      <param name="dyn_obstacles/obst_max_vel" value="$(arg obst_max_vel)"/>
+      <param name="dyn_obstacles/stop_dwell" value="4.0"/>
+      <param name="dyn_obstacles/hover_avoidance/enabled" value="true"/>
+      <param name="dyn_obstacles/hover_avoidance/trigger_dist" value="3.0"/>
+      <param name="dyn_obstacles/hover_avoidance/evasion_dist" value="2.5"/>
+      <param name="dyn_obstacles/escape_when_engulfed" value="true"/>
       <remap from="~state" to="/SQ81s/state"/>
       <remap from="~term_goal" to="/SQ81s/term_goal"/>
       <remap from="~goal" to="/SQ81s/goal"/>
@@ -44,6 +56,13 @@
       <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
       <param name="opt/a_star_samp_z" value="1"/>
       <param name="setting/goal_radius" value="0.4"/>
+      <param name="dyn_obstacles/enabled" value="$(arg dyn_obstacles)"/>
+      <param name="dyn_obstacles/obst_max_vel" value="$(arg obst_max_vel)"/>
+      <param name="dyn_obstacles/stop_dwell" value="4.0"/>
+      <param name="dyn_obstacles/hover_avoidance/enabled" value="true"/>
+      <param name="dyn_obstacles/hover_avoidance/trigger_dist" value="3.0"/>
+      <param name="dyn_obstacles/hover_avoidance/evasion_dist" value="2.5"/>
+      <param name="dyn_obstacles/escape_when_engulfed" value="true"/>
       <remap from="~state" to="/SQ83s/state"/>
       <remap from="~term_goal" to="/SQ83s/term_goal"/>
       <remap from="~goal" to="/SQ83s/goal"/>

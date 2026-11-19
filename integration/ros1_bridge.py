@@ -8,11 +8,59 @@ import time
 
 import rospy
 from geometry_msgs.msg import PoseStamped
-from rmader_msgs.msg import DynTraj
+from rmader_msgs.msg import DynTraj, ObstacleObservation
 from snapstack_msgs.msg import Goal, State
 from trajectory_preview import sample_pwp_timed
 
 NAMES = {"JR81": "SQ81s", "RR83": "SQ83s"}
+ROVER_HEIGHT = 0.4  # [m] obstacles are given this height when a row has only a planar size
+
+
+def finite_list(values, lengths):
+    return isinstance(values, list) and len(values) in lengths and \
+        all(isinstance(v, (float, int)) and not isinstance(v, bool) and math.isfinite(v) for v in values)
+
+
+def obstacle_message(row, now):
+    """Builds an ObstacleObservation from an `obstacle` row, or returns None if the row is malformed.
+
+    {"type": "obstacle", "id": 7, "p": [x, y] or [x, y, z], "size": [sx, sy] or [sx, sy, sz],
+     "v": [vx, vy] or [vx, vy, vz]   (optional; without it the planner estimates the velocity),
+     "static": true                  (optional; the obstacle is known not to move),
+     "age_s": 0.08}                  (optional; how old the observation was when the row was sent)
+
+    The two ends of the bridge do not share a clock, so the observation is stamped with this end's time of
+    arrival minus age_s. Whatever delay is not declared in age_s is delay the planner cannot account for.
+    """
+    identifier = row.get("id")
+    age = row.get("age_s", 0.0)
+    if not isinstance(identifier, int) or isinstance(identifier, bool) or not -2**31 <= identifier < 2**31:
+        return None
+    if not finite_list(row.get("p"), (2, 3)) or not finite_list(row.get("size"), (2, 3)):
+        return None
+    if any(value <= 0.0 for value in row["size"]):
+        return None
+    if "v" in row and not finite_list(row["v"], (2, 3)):
+        return None
+    if not isinstance(age, (float, int)) or isinstance(age, bool) or not math.isfinite(age) or not 0.0 <= age <= 5.0:
+        return None
+    if not isinstance(row.get("static", False), bool):
+        return None
+
+    message = ObstacleObservation()
+    message.header.stamp = now - rospy.Duration.from_sec(age)
+    message.header.frame_id = "world"
+    message.id = identifier
+    position = row["p"] + [0.0] * (3 - len(row["p"]))
+    size = row["size"] + [ROVER_HEIGHT] * (3 - len(row["size"]))
+    message.pos.x, message.pos.y, message.pos.z = position
+    message.bbox.x, message.bbox.y, message.bbox.z = size
+    message.has_vel = "v" in row
+    if message.has_vel:
+        velocity = row["v"] + [0.0] * (3 - len(row["v"]))
+        message.vel.x, message.vel.y, message.vel.z = velocity
+    message.is_static = row.get("static", False)
+    return message
 
 
 class Bridge:
@@ -25,6 +73,8 @@ class Bridge:
                               "max_plan_yaw_rate": 0.0, "yaw_rate_violations": 0,
                               "max_abs_vertical": 0.0} for name in NAMES}
         self.last_setpoint = {name: 0.0 for name in NAMES}
+        self.obstacle_rows = 0
+        self.obstacles = rospy.Publisher("/obstacle_observations", ObstacleObservation, queue_size=50)
         for name, ns in NAMES.items():
             self.states[name] = rospy.Publisher("/" + ns + "/state", State, queue_size=5)
             self.goals[name] = rospy.Publisher("/" + ns + "/term_goal", PoseStamped, queue_size=1, latch=True)
@@ -73,7 +123,7 @@ class Bridge:
         self.send(row)
 
     def heartbeat(self, _event):
-        self.send({"type": "heartbeat", "counts": self.counts,
+        self.send({"type": "heartbeat", "counts": self.counts, "obstacle_rows": self.obstacle_rows,
                    "peer_subscribed": all(self.states[n].get_num_connections() > 0 for n in NAMES)})
 
     def receive(self, row):
@@ -94,6 +144,12 @@ class Bridge:
                 m.pose.orientation.w = 1.0
                 self.goals[name].publish(m)
             self.send({"type": "goal_batch_ack", "leg": row.get("leg"), "stamp": stamp.to_sec()})
+            return
+        if row.get("type") == "obstacle":
+            message = obstacle_message(row, rospy.Time.now())
+            if message is not None:
+                self.obstacle_rows += 1
+                self.obstacles.publish(message)
             return
         name = row.get("agent")
         if name not in NAMES:

@@ -7,3 +7,5 @@ geometry_msgs/Vector3 pos      # centre of the obstacle [m], world frame
 geometry_msgs/Vector3 vel      # velocity [m/s]; only used if has_vel is true
 bool has_vel                   # false: the planner estimates the velocity itself
 geometry_msgs/Vector3 bbox     # full size of the obstacle's bounding box [m]
+bool is_static                 # true: known not to move (a wall, a parked crate). Its box never grows and the
+                               # track is kept without being observed again

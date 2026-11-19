@@ -7,6 +7,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <queue>
+#include <unordered_map>
 
 namespace dynobs
 {
@@ -177,6 +180,20 @@ bool Tracker::update(const Observation& obs)
   }
 
   it->history.emplace_back(obs.stamp, obs.pos);
+  it->declared_static = obs.is_static;
+  if (obs.is_static)
+  {
+    // Nothing to estimate and nothing to bound: with a zero speed bound every box below stays the body.
+    it->history.clear();
+    it->stamp = obs.stamp;
+    it->pos = obs.pos;
+    it->bbox = obs.bbox;
+    it->vel.setZero();
+    it->max_vel = 0.0;
+    it->is_dynamic = false;
+    it->num_observations++;
+    return true;
+  }
   it->stamp = obs.stamp;
   it->pos = obs.pos;
   it->bbox = obs.bbox;
@@ -191,17 +208,19 @@ bool Tracker::update(const Observation& obs)
 
 std::vector<int> Tracker::prune(double now)
 {
+  auto expired = [&](const Track& track) {
+    const double timeout = track.declared_static ? par_.static_track_timeout : par_.track_timeout;
+    return timeout > 0.0 && now - track.stamp > timeout;
+  };
   std::vector<int> removed;
   for (const Track& track : tracks_)
   {
-    if (now - track.stamp > par_.track_timeout)
+    if (expired(track))
     {
       removed.push_back(track.id);
     }
   }
-  tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
-                               [&](const Track& track) { return now - track.stamp > par_.track_timeout; }),
-                tracks_.end());
+  tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(), expired), tracks_.end());
   return removed;
 }
 
@@ -218,7 +237,7 @@ bool Tracker::get(int id, Track& track) const
 
 double heat(const Eigen::Vector3d& q, const std::vector<Track>& tracks, const Params& par)
 {
-  const double horizon = par.prediction_horizon;        // T_h
+  const double horizon = (par.heat_horizon > 0.0) ? par.heat_horizon : par.prediction_horizon;  // T_h
   const double tau = par.heat_tau_ratio * horizon;      // tau^d
   const int samples = std::max(1, par.heat_num_samples);  // M_tube
 
@@ -245,6 +264,227 @@ double heat(const Eigen::Vector3d& q, const std::vector<Track>& tracks, const Pa
     hottest = std::max(hottest, base + par.heat_alpha_tube * tube);  // max over obstacles
   }
   return std::min(hottest, par.heat_max);
+}
+
+namespace
+{
+struct Cell
+{
+  int x = 0, y = 0, z = 0;
+  bool operator==(const Cell& other) const
+  {
+    return x == other.x && y == other.y && z == other.z;
+  }
+};
+
+struct CellHash
+{
+  size_t operator()(const Cell& cell) const
+  {
+    // Offsets are small (window / resolution), so 21 bits per axis is plenty.
+    return (static_cast<size_t>(cell.x + (1 << 20)) << 42) ^ (static_cast<size_t>(cell.y + (1 << 20)) << 21) ^
+           static_cast<size_t>(cell.z + (1 << 20));
+  }
+};
+
+struct CellInfo
+{
+  double g = std::numeric_limits<double>::max();
+  Cell parent;
+  bool closed = false;
+  bool evaluated = false;  // blocked / heat computed
+  bool blocked = false;
+  double heat = 0.0;
+};
+
+struct QueueEntry
+{
+  double f;
+  double g;
+  Cell cell;
+  bool operator<(const QueueEntry& other) const
+  {
+    return f > other.f;  // smallest f first
+  }
+};
+}  // namespace
+
+bool planGlobalPath(const GlobalPathRequest& request, const std::vector<Track>& tracks, const Params& par,
+                    std::vector<Eigen::Vector3d>& path)
+{
+  path.clear();
+  const double res = par.global_resolution;
+  if (res <= 0.0)
+  {
+    return false;
+  }
+
+  // Search window around the start, clipped to the allowed region.
+  Eigen::Vector3d window(par.global_window, par.global_window, request.planar ? 0.0 : par.global_window_z);
+  const Eigen::Vector3d lower = (request.start - window).cwiseMax(request.lower);
+  const Eigen::Vector3d upper = (request.start + window).cwiseMin(request.upper);
+
+  auto center = [&](const Cell& cell) {
+    return Eigen::Vector3d(request.start.x() + res * cell.x, request.start.y() + res * cell.y,
+                           request.start.z() + res * cell.z);
+  };
+  auto inside = [&](const Eigen::Vector3d& p) {
+    // The start itself is always allowed, even if it sits just outside the region.
+    return (p.array() >= lower.array() - 1e-9).all() && (p.array() <= upper.array() + 1e-9).all();
+  };
+
+  // Goal: clamp into the window, then snap to the grid.
+  const Eigen::Vector3d clamped = request.goal.cwiseMax(lower).cwiseMin(upper);
+  Cell goal;
+  goal.x = static_cast<int>(std::lround((clamped.x() - request.start.x()) / res));
+  goal.y = static_cast<int>(std::lround((clamped.y() - request.start.y()) / res));
+  goal.z = request.planar ? 0 : static_cast<int>(std::lround((clamped.z() - request.start.z()) / res));
+  while (!inside(center(goal)) && !(goal == Cell()))  // rounding may have stepped over the edge
+  {
+    goal.x -= (goal.x > 0) - (goal.x < 0);
+    goal.y -= (goal.y > 0) - (goal.y < 0);
+    goal.z -= (goal.z > 0) - (goal.z < 0);
+  }
+  const Eigen::Vector3d goal_center = center(goal);
+
+  // Hard obstacles: only where each obstacle is now (paper: "only known static obstacles and the current
+  // location of dynamic obstacles enforce hard infeasibility"), grown by the agent's size and r_margin.
+  const double margin = par.base_inflation + par.obst_position_error;
+  auto blocked = [&](const Eigen::Vector3d& p) {
+    for (const Track& track : tracks)
+    {
+      const Eigen::Vector3d reach = 0.5 * track.bbox + request.agent_half_size + Eigen::Vector3d::Constant(margin);
+      if (((p - track.pos).cwiseAbs().array() <= reach.array()).all())
+      {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  std::unordered_map<Cell, CellInfo, CellHash> cells;
+  std::priority_queue<QueueEntry> open;
+  const Cell origin;
+  cells[origin].g = 0.0;
+  cells[origin].evaluated = true;
+  // If an obstacle is already on top of the start, the agent has to be able to get out: blocked cells may be
+  // crossed, at a price, for as long as the path has not reached a free cell yet.
+  cells[origin].blocked = blocked(request.start);
+  open.push({ (goal_center - request.start).norm(), 0.0, origin });
+
+  const int z_span = request.planar ? 0 : 1;
+  int expansions = 0;
+  bool found = false;
+  while (!open.empty() && expansions < par.global_max_expansions)
+  {
+    const QueueEntry entry = open.top();
+    open.pop();
+    CellInfo& current = cells[entry.cell];
+    if (current.closed)
+    {
+      continue;
+    }
+    current.closed = true;
+    expansions++;
+    if (entry.cell == goal)
+    {
+      found = true;
+      break;
+    }
+    const double current_g = current.g;
+    const bool escaping = current.blocked;
+    const Eigen::Vector3d current_center = center(entry.cell);
+
+    for (int dx = -1; dx <= 1; dx++)
+    {
+      for (int dy = -1; dy <= 1; dy++)
+      {
+        for (int dz = -z_span; dz <= z_span; dz++)
+        {
+          if (dx == 0 && dy == 0 && dz == 0)
+          {
+            continue;
+          }
+          Cell next;
+          next.x = entry.cell.x + dx;
+          next.y = entry.cell.y + dy;
+          next.z = entry.cell.z + dz;
+          const Eigen::Vector3d next_center = center(next);
+          if (!inside(next_center))
+          {
+            continue;
+          }
+          CellInfo& info = cells[next];  // note: may invalidate `current`, which is not used below
+          if (info.closed)
+          {
+            continue;
+          }
+          if (!info.evaluated)
+          {
+            info.evaluated = true;
+            // The goal cell stays reachable even if an obstacle currently sits on it; the planner's hard
+            // constraints decide how close the trajectory can actually get.
+            info.blocked = !(next == goal) && blocked(next_center);
+            info.heat = info.blocked ? 0.0 : heat(next_center, tracks, par);
+          }
+          if (info.blocked && !escaping)
+          {
+            continue;
+          }
+          const double g = current_g + (next_center - current_center).norm() + par.heat_weight * info.heat +
+                           (info.blocked ? 10.0 * res : 0.0);
+          if (g < info.g)
+          {
+            info.g = g;
+            info.parent = entry.cell;
+            open.push({ g + (goal_center - next_center).norm(), g, next });
+          }
+        }
+      }
+    }
+  }
+
+  if (!found)
+  {
+    return false;
+  }
+
+  for (Cell cell = goal; !(cell == origin); cell = cells[cell].parent)
+  {
+    path.push_back(center(cell));
+  }
+  path.push_back(request.start);
+  std::reverse(path.begin(), path.end());
+  return true;
+}
+
+double pathLength(const std::vector<Eigen::Vector3d>& path)
+{
+  double length = 0.0;
+  for (size_t i = 1; i < path.size(); i++)
+  {
+    length += (path[i] - path[i - 1]).norm();
+  }
+  return length;
+}
+
+Eigen::Vector3d pointAlongPath(const std::vector<Eigen::Vector3d>& path, double arc_length)
+{
+  if (path.empty())
+  {
+    return Eigen::Vector3d::Zero();
+  }
+  double remaining = std::max(0.0, arc_length);
+  for (size_t i = 1; i < path.size(); i++)
+  {
+    const double segment = (path[i] - path[i - 1]).norm();
+    if (remaining <= segment && segment > 1e-12)
+    {
+      return path[i - 1] + (path[i] - path[i - 1]) * (remaining / segment);
+    }
+    remaining -= segment;
+  }
+  return path.back();
 }
 
 bool hoverEvasionGoal(const Eigen::Vector3d& pos, double now, const std::vector<Track>& tracks, const Params& par,

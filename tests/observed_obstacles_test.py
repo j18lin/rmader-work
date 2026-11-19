@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Closed-loop check of R-MADER among obstacles it can only observe.
 
-The obstacles never broadcast a trajectory. The planner receives their
-positions on /obstacle_observations (no velocities, bounded noise) and has to
+The obstacles never broadcast a trajectory. The planners receive their
+positions on /obstacle_observations (no velocities, bounded noise) and have to
 stay clear using only the configured speed bound.
 
-Scenarios:
-  crossing  The agent shuttles between two goals while three obstacles wander
-            erratically (random waypoints, random speeds up to the bound)
-            through the corridor it has to fly along.
-  hover     The agent is parked at its goal. An obstacle drives straight
-            through that spot. With hover avoidance the agent has to get out
-            of the way and come back.
+Scenarios (launch tests/observed_obstacles.launch with the arguments shown):
+  crossing   One aerial agent shuttles through a corridor in which three
+             obstacles wander erratically (random waypoints, random speeds up
+             to the bound).
+  crossing2  Two aerial agents swap ends through that same corridor, so they
+             also have to deconflict with each other.      [agents:=2]
+  hover      An aerial agent is parked at its goal and an obstacle drives
+             straight through that spot.                    [hover_avoidance:=true]
+  ground     One rover (ground mode, unicycle tracker) shuttles across an
+             arena in which two slower obstacles wander.
+                                        [ground:=true obst_max_vel:=0.25]
+  ground2    Two rovers cross at right angles through that arena.
+                               [ground:=true obst_max_vel:=0.25 agents:=2]
 
 Run the same scenario with dyn_obstacles disabled (pass --expect-collision)
 to confirm that the scenario does produce collisions without the feature.
@@ -29,81 +35,154 @@ from geometry_msgs.msg import PoseStamped
 from rmader_msgs.msg import DynTraj, ObstacleObservation
 from snapstack_msgs.msg import Goal, State
 
-NAME = "SQ01s"
-AGENT_BBOX = 0.35
-OBSTACLE_BBOX = 0.6
-OBSTACLE_MAX_SPEED = 0.5      # [m/s] must not exceed dyn_obstacles/obst_max_vel in the launch file
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sim_models import Charger, Unicycle, Wanderer, box_gap, distance, vector_limit  # noqa: E402
+
 OBSERVATION_NOISE = 0.03      # [m] per-axis bound on the position error; matches dyn_obstacles/obst_position_error
 OBSERVATION_HZ = 20.0
-HEIGHT = 1.5
+OBSTACLE_BBOX = (0.6, 0.6, 0.6)
 
 
-def distance(a, b):
-    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+class Robot:
+    """A planner under test plus the vehicle model that tracks its setpoints."""
 
-
-def vector_limit(values, limit):
-    length = math.sqrt(sum(value * value for value in values))
-    if length <= limit or length == 0:
-        return values
-    return [value * limit / length for value in values]
-
-
-def box_gap(agent, obstacle):
-    """Signed gap between the two axis-aligned boxes; negative means they overlap."""
-    reach = 0.5 * (AGENT_BBOX + OBSTACLE_BBOX)
-    return max(abs(a - o) - reach for a, o in zip(agent, obstacle))
-
-
-class Wanderer:
-    """Moves to random waypoints inside a box at random speeds up to the bound."""
-
-    def __init__(self, rng, low, high):
-        self.rng = rng
-        self.low = low
-        self.high = high
-        self.position = self._sample()
-        self._retarget()
-
-    def _sample(self):
-        return [self.rng.uniform(lo, hi) for lo, hi in zip(self.low, self.high)]
-
-    def _retarget(self):
-        self.target = self._sample()
-        self.speed = self.rng.uniform(0.4, 1.0) * OBSTACLE_MAX_SPEED
-
-    def step(self, dt, _now):
-        offset = [t - p for t, p in zip(self.target, self.position)]
-        remaining = math.sqrt(sum(value * value for value in offset))
-        travel = self.speed * dt
-        if remaining <= travel:
-            self.position = list(self.target)
-            self._retarget()
-        else:
-            self.position = [p + o * travel / remaining for p, o in zip(self.position, offset)]
-
-
-class Charger:
-    """Waits, then drives in a straight line through a point and beyond."""
-
-    def __init__(self, start, through, start_after_s, speed):
+    def __init__(self, name, start, goals, ground=False, yaw=0.0):
+        self.name = name
         self.position = list(start)
-        direction = [t - s for t, s in zip(through, start)]
-        length = math.sqrt(sum(value * value for value in direction))
-        self.velocity = [value * speed / length for value in direction]
-        self.start_after_s = start_after_s
-        self.stop_after_s = start_after_s + 2.0 * length / speed
+        self.velocity = [0.0, 0.0, 0.0]
+        self.yaw = yaw
+        self.unicycle = Unicycle(start, yaw) if ground else None
+        self.goals = goals
+        self.goal_index = 0
+        self.ground = ground
+        self.bbox = (0.7, 0.7, 0.4) if ground else (0.35, 0.35, 0.35)
+        self.reach_tolerance = 0.5 if ground else 0.25
+        self.setpoint = None
+        self.setpoint_yaw = yaw
+        self.aligning = False
+        self.trajectories = 0
+        self.committed = 0
+        self.legs = []
+        self.reached = False
+        self.max_excursion = 0.0
+        self.state_pub = rospy.Publisher("/" + name + "/state", State, queue_size=10)
+        self.goal_pub = rospy.Publisher("/" + name + "/term_goal", PoseStamped, queue_size=1, latch=True)
+        self.subscribers = [
+            rospy.Subscriber("/" + name + "/goal", Goal, self.on_setpoint, queue_size=20),
+            rospy.Subscriber("/" + name + "/rmader/trajs", DynTraj, self.on_trajectory, queue_size=20),
+        ]
 
-    def step(self, dt, elapsed):
-        if self.start_after_s <= elapsed < self.stop_after_s:
-            self.position = [p + v * dt for p, v in zip(self.position, self.velocity)]
+    @property
+    def goal(self):
+        return self.goals[self.goal_index]
+
+    def connected(self):
+        return self.state_pub.get_num_connections() > 0 and self.goal_pub.get_num_connections() > 0
+
+    def on_setpoint(self, message):
+        self.setpoint = ([message.p.x, message.p.y, message.p.z], [message.v.x, message.v.y, message.v.z])
+        self.setpoint_yaw = message.psi
+
+    def on_trajectory(self, message):
+        self.trajectories += 1
+        if message.is_committed:
+            self.committed += 1
+
+    def publish_state(self):
+        stamp = rospy.Time.now()
+        message = State()
+        message.header.stamp = stamp
+        message.header.frame_id = "world"
+        message.state_stamp = stamp
+        message.pos.x, message.pos.y, message.pos.z = self.position
+        message.vel.x, message.vel.y, message.vel.z = self.velocity
+        message.quat.z = math.sin(self.yaw / 2.0)
+        message.quat.w = math.cos(self.yaw / 2.0)
+        self.state_pub.publish(message)
+
+    def publish_goal(self):
+        message = PoseStamped()
+        message.header.stamp = rospy.Time.now()
+        message.header.frame_id = "world"
+        message.pose.position.x, message.pose.position.y, message.pose.position.z = self.goal
+        message.pose.orientation.w = 1.0
+        self.goal_pub.publish(message)
+
+    def start_leg(self):
+        """A rover first turns towards its goal, as the simulator bridge does; the goal follows once it faces it."""
+        self.reached = False
+        if self.ground:
+            self.aligning = True
+        else:
+            self.publish_goal()
+
+    def step(self, dt):
+        if self.ground:
+            self._step_unicycle(dt)
+        else:
+            self._step_point_mass(dt)
+        self.max_excursion = max(self.max_excursion, distance(self.position, self.goal))
+
+    def _step_point_mass(self, dt):
+        if self.setpoint is None:
+            return
+        target, feedforward = self.setpoint
+        acceleration = [5.0 * (target[i] - self.position[i]) + 3.0 * (feedforward[i] - self.velocity[i])
+                        for i in range(3)]
+        acceleration = vector_limit(acceleration, 4.0)
+        self.velocity = vector_limit([self.velocity[i] + acceleration[i] * dt for i in range(3)], 2.0)
+        self.position = [self.position[i] + self.velocity[i] * dt for i in range(3)]
+
+    def _step_unicycle(self, dt):
+        model = self.unicycle
+        if self.aligning:
+            heading = math.atan2(self.goal[1] - model.position[1], self.goal[0] - model.position[0])
+            if model.turn_towards(heading, dt):
+                self.aligning = False
+                self.setpoint = None
+                self.publish_goal()
+        elif self.setpoint is not None:
+            model.track(self.setpoint[0], self.setpoint[1], self.setpoint_yaw, dt)
+        else:
+            model.stop(dt)
+        self.position, self.velocity, self.yaw = model.position, model.velocity, model.yaw
+
+
+def build_scenario(name, rng):
+    """Returns (robots, obstacles, obstacle speed bound)."""
+    if name in ("crossing", "crossing2"):
+        height = 1.5
+        west, east = (-4.0, 0.0, height), (4.0, 0.0, height)
+        robots = [Robot("SQ01s", west, [east, west])]
+        if name == "crossing2":
+            robots.append(Robot("SQ02s", east, [west, east]))
+        speed = 0.5
+        obstacles = [Wanderer(rng, (-2.0, -0.7, height), (2.0, 0.7, height), speed) for _ in range(3)]
+    elif name == "hover":
+        height = 1.5
+        home = (0.0, 0.0, height)
+        robots = [Robot("SQ01s", home, [home])]
+        speed = 0.5
+        obstacles = [Charger((-5.0, 0.0, height), home, start_after_s=6.0, speed=0.4)]
+    else:
+        west, east = (-5.0, 0.0, 0.0), (5.0, 0.0, 0.0)
+        south, north = (0.0, -5.0, 0.0), (0.0, 5.0, 0.0)
+        robots = [Robot("SQ01s", west, [east, west], ground=True, yaw=0.0)]
+        if name == "ground2":
+            robots.append(Robot("SQ02s", south, [north, south], ground=True, yaw=math.pi / 2.0))
+        speed = 0.25
+        obstacles = [Wanderer(rng, (-2.0, -2.0, 0.0), (2.0, 2.0, 0.0), speed) for _ in range(2)]
+    return robots, obstacles, speed
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenario", choices=("crossing", "hover"), default="crossing")
+    parser.add_argument("--scenario", choices=("crossing", "crossing2", "hover", "ground", "ground2"),
+                        default="crossing")
     parser.add_argument("--duration", type=float, default=90.0)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--min-legs", type=int, default=2, help="legs every robot has to complete")
+    parser.add_argument("--no-obstacles", action="store_true", help="baseline: remove the obstacles")
     parser.add_argument("--report", default="test-results/observed_obstacles.json")
     parser.add_argument("--expect-collision", action="store_true",
                         help="control run with the feature disabled: pass only if the scenario collides")
@@ -111,56 +190,19 @@ def main():
 
     rospy.init_node("observed_obstacles_test", anonymous=False)
     rng = random.Random(args.seed)
-
-    if args.scenario == "crossing":
-        start = (-4.0, 0.0, HEIGHT)
-        goals = [(4.0, 0.0, HEIGHT), start]
-        # Three obstacles wandering inside the corridor the straight line passes through.
-        low, high = (-2.0, -0.7, HEIGHT), (2.0, 0.7, HEIGHT)
-        obstacles = [Wanderer(rng, low, high) for _ in range(3)]
-    else:
-        start = (0.0, 0.0, HEIGHT)
-        goals = [start]
-        obstacles = [Charger((-5.0, 0.0, HEIGHT), start, start_after_s=6.0, speed=0.4)]
-
-    agent = {"position": list(start), "velocity": [0.0, 0.0, 0.0], "setpoint": None,
-             "trajectories": 0, "committed": 0}
-
-    def on_goal(message):
-        agent["setpoint"] = ([message.p.x, message.p.y, message.p.z], [message.v.x, message.v.y, message.v.z])
-
-    def on_trajectory(message):
-        agent["trajectories"] += 1
-        if message.is_committed:
-            agent["committed"] += 1
-
-    state_pub = rospy.Publisher("/" + NAME + "/state", State, queue_size=10)
-    terminal_pub = rospy.Publisher("/" + NAME + "/term_goal", PoseStamped, queue_size=1, latch=True)
+    robots, obstacles, obstacle_speed = build_scenario(args.scenario, rng)
+    if args.no_obstacles:
+        obstacles = []
     observation_pub = rospy.Publisher("/obstacle_observations", ObstacleObservation, queue_size=50)
-    listeners = [
-        rospy.Subscriber("/" + NAME + "/goal", Goal, on_goal, queue_size=20),
-        rospy.Subscriber("/" + NAME + "/rmader/trajs", DynTraj, on_trajectory, queue_size=20),
-    ]
 
     rate = rospy.Rate(50)
     deadline = time.monotonic() + 25.0
     while not rospy.is_shutdown():
-        if state_pub.get_num_connections() > 0 and terminal_pub.get_num_connections() > 0:
+        if all(robot.connected() for robot in robots):
             break
         if time.monotonic() >= deadline:
-            raise RuntimeError("planner did not subscribe to state and term_goal")
+            raise RuntimeError("planners did not subscribe to state and term_goal")
         rate.sleep()
-
-    def publish_state():
-        stamp = rospy.Time.now()
-        message = State()
-        message.header.stamp = stamp
-        message.header.frame_id = "world"
-        message.state_stamp = stamp
-        message.pos.x, message.pos.y, message.pos.z = agent["position"]
-        message.vel.x, message.vel.y, message.vel.z = agent["velocity"]
-        message.quat.w = 1.0
-        state_pub.publish(message)
 
     def publish_observations():
         stamp = rospy.Time.now()
@@ -172,38 +214,27 @@ def main():
             noisy = [value + rng.uniform(-OBSERVATION_NOISE, OBSERVATION_NOISE) for value in obstacle.position]
             message.pos.x, message.pos.y, message.pos.z = noisy
             message.has_vel = False
-            message.bbox.x = message.bbox.y = message.bbox.z = OBSTACLE_BBOX
+            message.bbox.x, message.bbox.y, message.bbox.z = OBSTACLE_BBOX
             observation_pub.publish(message)
 
-    def publish_goal(target):
-        message = PoseStamped()
-        message.header.stamp = rospy.Time.now()
-        message.header.frame_id = "world"
-        message.pose.position.x, message.pose.position.y, message.pose.position.z = target
-        message.pose.orientation.w = 1.0
-        terminal_pub.publish(message)
-
-    # Let the planner see its own state and the obstacles before the first goal.
+    # Let the planners see their own state and the obstacles before the first goal.
     for _ in range(100):
-        publish_state()
+        for robot in robots:
+            robot.publish_state()
         publish_observations()
         rate.sleep()
 
     start_time = time.monotonic()
-    goal_index = 0
-    publish_goal(goals[goal_index])
-    legs = []
+    for robot in robots:
+        robot.start_leg()
     leg_start = start_time
-    reached_since = None
+    all_reached_since = None
     last_tick = start_time
     last_observation = 0.0
     last_progress = start_time
-    min_gap = float("inf")
-    min_gap_at_s = 0.0
-    min_gap_positions = None
-    min_gap_agent_speed = 0.0
+    obstacle_gap = {"value": float("inf"), "at_s": 0.0, "robot": None, "positions": None, "robot_speed": 0.0}
+    robot_gap = {"value": float("inf"), "at_s": 0.0, "positions": None}
     collision_s = 0.0
-    max_excursion = 0.0
 
     while not rospy.is_shutdown():
         now = time.monotonic()
@@ -215,63 +246,73 @@ def main():
 
         for obstacle in obstacles:
             obstacle.step(dt, elapsed)
-
-        setpoint = agent["setpoint"]
-        if setpoint is not None:
-            position_target, velocity_target = setpoint
-            acceleration = [
-                5.0 * (position_target[i] - agent["position"][i]) + 3.0 * (velocity_target[i] - agent["velocity"][i])
-                for i in range(3)
-            ]
-            acceleration = vector_limit(acceleration, 4.0)
-            agent["velocity"] = vector_limit(
-                [agent["velocity"][i] + acceleration[i] * dt for i in range(3)], 2.0)
-            agent["position"] = [agent["position"][i] + agent["velocity"][i] * dt for i in range(3)]
-
-        publish_state()
+        for robot in robots:
+            robot.step(dt)
+            robot.publish_state()
         if now - last_observation >= 1.0 / OBSERVATION_HZ:
             publish_observations()
             last_observation = now
 
-        for obstacle in obstacles:
-            gap = box_gap(agent["position"], obstacle.position)
-            if gap < min_gap:
-                min_gap = gap
-                min_gap_at_s = elapsed
-                min_gap_positions = [list(agent["position"]), list(obstacle.position)]
-                min_gap_agent_speed = math.sqrt(sum(value * value for value in agent["velocity"]))
-            if gap < 0.0:
-                collision_s += dt
-        max_excursion = max(max_excursion, distance(agent["position"], goals[goal_index]))
+        colliding = False
+        for robot in robots:
+            for obstacle in obstacles:
+                gap = box_gap(robot.position, robot.bbox, obstacle.position, OBSTACLE_BBOX)
+                if gap < obstacle_gap["value"]:
+                    obstacle_gap = {"value": gap, "at_s": elapsed, "robot": robot.name,
+                                    "positions": [list(robot.position), list(obstacle.position)],
+                                    "robot_speed": math.sqrt(sum(v * v for v in robot.velocity))}
+                colliding = colliding or gap < 0.0
+        if colliding:
+            collision_s += dt
+        for index, first in enumerate(robots):
+            for second in robots[index + 1:]:
+                gap = box_gap(first.position, first.bbox, second.position, second.bbox)
+                if gap < robot_gap["value"]:
+                    robot_gap = {"value": gap, "at_s": elapsed,
+                                 "positions": [list(first.position), list(second.position)]}
 
-        if args.scenario == "crossing":
-            if reached_since is None and distance(agent["position"], goals[goal_index]) < 0.25:
-                reached_since = now
-                legs.append(round(now - leg_start, 3))
-            if reached_since is not None and now - reached_since >= 1.0:
-                goal_index = (goal_index + 1) % len(goals)
-                publish_goal(goals[goal_index])
-                leg_start = now
-                reached_since = None
+        # Legs are synchronized: the next goals go out one second after every robot has arrived.
+        if args.scenario != "hover":
+            for robot in robots:
+                if not robot.reached and not robot.aligning and \
+                        distance(robot.position, robot.goal) < robot.reach_tolerance:
+                    robot.reached = True
+                    robot.legs.append(round(now - leg_start, 3))
+            if all(robot.reached for robot in robots):
+                if all_reached_since is None:
+                    all_reached_since = now
+                elif now - all_reached_since >= 1.0:
+                    for robot in robots:
+                        robot.goal_index = (robot.goal_index + 1) % len(robot.goals)
+                        robot.start_leg()
+                    leg_start = now
+                    all_reached_since = None
 
         if now - last_progress >= 10.0:
-            print("elapsed %.1fs legs %d min box gap %.3f m trajectories %d"
-                  % (elapsed, len(legs), min_gap, agent["trajectories"]), flush=True)
+            print("elapsed %.1fs legs %s min obstacle gap %.3f m min robot gap %.3f m trajectories %s"
+                  % (elapsed, [len(robot.legs) for robot in robots], obstacle_gap["value"], robot_gap["value"],
+                     [robot.trajectories for robot in robots]), flush=True)
             last_progress = now
         rate.sleep()
 
-    final_error = distance(agent["position"], goals[goal_index])
-    collided = min_gap < 0.0
-    gates = {"planned": agent["committed"] > 0 if args.scenario == "crossing" else True}
+    collided = obstacle_gap["value"] < 0.0
+    gates = {}
+    if args.scenario != "hover":
+        gates["planned"] = all(robot.committed > 0 for robot in robots)
+    if len(robots) > 1:
+        gates["robots_apart"] = robot_gap["value"] >= 0.0
     if args.expect_collision:
         gates["scenario_collides_without_feature"] = collided
     else:
         gates["no_collision"] = not collided
-        if args.scenario == "crossing":
-            gates["legs"] = len(legs) >= 2
+        if args.scenario == "hover":
+            gates["evaded"] = robots[0].max_excursion >= 1.0
+            gates["returned_to_goal"] = distance(robots[0].position, robots[0].goal) < 0.3
         else:
-            gates["evaded"] = max_excursion >= 1.0
-            gates["returned_to_goal"] = final_error < 0.3
+            gates["legs"] = all(len(robot.legs) >= args.min_legs for robot in robots)
+
+    def rounded(value):
+        return None if value == float("inf") else round(value, 4)
 
     report = {
         "scenario": args.scenario,
@@ -279,18 +320,23 @@ def main():
         "seed": args.seed,
         "duration_s": round(time.monotonic() - start_time, 3),
         "obstacles": len(obstacles),
-        "obstacle_max_speed_mps": OBSTACLE_MAX_SPEED,
-        "minimum_box_gap_m": round(min_gap, 4),
-        "minimum_box_gap_at_s": round(min_gap_at_s, 3),
-        "positions_at_minimum_gap_m": min_gap_positions,
-        "agent_speed_at_minimum_gap_mps": round(min_gap_agent_speed, 3),
+        "obstacle_max_speed_mps": obstacle_speed,
+        "minimum_box_gap_m": rounded(obstacle_gap["value"]),
+        "minimum_box_gap_at_s": round(obstacle_gap["at_s"], 3),
+        "minimum_box_gap_robot": obstacle_gap["robot"],
+        "positions_at_minimum_gap_m": obstacle_gap["positions"],
+        "agent_speed_at_minimum_gap_mps": round(obstacle_gap["robot_speed"], 3),
         "time_in_collision_s": round(collision_s, 3),
-        "legs_reached": len(legs),
-        "leg_completion_s": legs,
-        "max_distance_from_goal_m": round(max_excursion, 3),
-        "final_error_m": round(final_error, 4),
-        "trajectory_count": agent["trajectories"],
-        "committed_trajectory_count": agent["committed"],
+        "minimum_robot_gap_m": rounded(robot_gap["value"]),
+        "minimum_robot_gap_at_s": round(robot_gap["at_s"], 3),
+        "legs_reached": min(len(robot.legs) for robot in robots),
+        "max_distance_from_goal_m": round(max(robot.max_excursion for robot in robots), 3),
+        "final_error_m": round(max(distance(robot.position, robot.goal) for robot in robots), 4),
+        "robots": {robot.name: {"legs_reached": len(robot.legs), "leg_completion_s": robot.legs,
+                                "trajectory_count": robot.trajectories,
+                                "committed_trajectory_count": robot.committed,
+                                "final_error_m": round(distance(robot.position, robot.goal), 4)}
+                   for robot in robots},
         "gates": gates,
         "passed": all(gates.values()),
     }
@@ -299,7 +345,6 @@ def main():
         json.dump(report, output, indent=2, sort_keys=True)
         output.write("\n")
     print(json.dumps(report, indent=2, sort_keys=True), flush=True)
-    del listeners
     return 0 if report["passed"] else 1
 
 
