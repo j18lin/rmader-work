@@ -44,7 +44,14 @@ enum class Mode
   // The centre follows a constant-velocity prediction for prediction_horizon seconds and the box grows at
   // the slower prediction_growth rate. Tighter, but only as good as the prediction: no guarantee. The
   // result is clipped to the REACHABLE box, which it can never exceed.
-  PREDICTED = 1
+  PREDICTED = 1,
+  // Also beyond the paper, but with the same kind of guarantee as REACHABLE under one more assumption: each
+  // component of the obstacle's acceleration stays within obst_max_acc. Starting from the estimated
+  // velocity (known to within obst_velocity_error), the obstacle can then only get as far as accelerating
+  // flat out allows: the set is centred on where it is heading and at first grows with time squared, not
+  // linearly. It is never larger than the REACHABLE box. An obstacle that can turn on the spot (a person)
+  // breaks the assumption; a vehicle with known limits does not.
+  ACCEL_BOUNDED = 2
 };
 
 bool modeFromString(const std::string& name, Mode& mode);
@@ -57,6 +64,8 @@ struct Params
   double obst_max_vel = 0.5;         // [m/s] v_max^obs: bound on each component of an obstacle's velocity
   double obst_position_error = 0.05; // [m] epsilon: bound on the per-axis error of an observed position
   double base_inflation = 0.1;       // [m] r_margin: constant extra margin around every observed obstacle
+  double obst_max_acc = 1.0;         // [m/s^2] ACCEL_BOUNDED: bound on each component of an obstacle's acceleration
+  double obst_velocity_error = 0.1;  // [m/s] ACCEL_BOUNDED: bound on the per-axis error of the velocity estimate
   double prediction_horizon = 1.0;   // [s] PREDICTED: how long the constant-velocity prediction is extrapolated
   double prediction_growth = 0.2;    // [m/s] PREDICTED: growth rate of the box along the prediction
 

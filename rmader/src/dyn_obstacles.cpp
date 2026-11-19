@@ -52,6 +52,23 @@ Eigen::Vector3d closestPointOnSegment(const Eigen::Vector3d& p, const Eigen::Vec
   return a + s * ab;
 }
 
+// Furthest a point can travel along one axis in time tau, starting at velocity v0 (clamped to the speed
+// bound) and accelerating at `acc` until it reaches the speed bound, then holding it.
+double furthest(double v0, double tau, double acc, double max_vel)
+{
+  v0 = std::min(std::max(v0, -max_vel), max_vel);
+  if (acc <= 0.0)
+  {
+    return v0 * tau;
+  }
+  const double t_to_bound = (max_vel - v0) / acc;
+  if (tau <= t_to_bound)
+  {
+    return v0 * tau + 0.5 * acc * tau * tau;
+  }
+  return v0 * t_to_bound + 0.5 * acc * t_to_bound * t_to_bound + max_vel * (tau - t_to_bound);
+}
+
 double falloff(double distance, double radius, double power)
 {
   if (radius <= 0.0 || distance >= radius)
@@ -72,6 +89,11 @@ bool modeFromString(const std::string& name, Mode& mode)
   if (name == "predicted")
   {
     mode = Mode::PREDICTED;
+    return true;
+  }
+  if (name == "accel_bounded")
+  {
+    mode = Mode::ACCEL_BOUNDED;
     return true;
   }
   return false;
@@ -99,6 +121,26 @@ Box centerBox(const Track& track, double t_a, double t_b, const Params& par, con
   if (par.mode == Mode::REACHABLE)
   {
     return worst;
+  }
+
+  if (par.mode == Mode::ACCEL_BOUNDED)
+  {
+    // Per axis: the furthest forwards is reached by starting at the largest velocity the estimate allows
+    // and accelerating flat out; the furthest backwards by the mirror image. The first is convex in time
+    // and the second concave, so over an interval both extremes are at its ends.
+    Box box;
+    for (int i = 0; i < 3; i++)
+    {
+      const double v_hi = track.vel[i] + par.obst_velocity_error;
+      const double v_lo = track.vel[i] - par.obst_velocity_error;
+      const double forwards = std::max(furthest(v_hi, tau_a, par.obst_max_acc, track.max_vel),
+                                       furthest(v_hi, tau_b, par.obst_max_acc, track.max_vel));
+      const double backwards = std::max(furthest(-v_lo, tau_a, par.obst_max_acc, track.max_vel),
+                                        furthest(-v_lo, tau_b, par.obst_max_acc, track.max_vel));
+      box.hi[i] = std::min(track.pos[i] + forwards + margin[i], worst.hi[i]);
+      box.lo[i] = std::max(track.pos[i] - backwards - margin[i], worst.lo[i]);
+    }
+    return box;
   }
 
   if (!track.is_dynamic)

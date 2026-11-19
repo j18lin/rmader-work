@@ -1,13 +1,18 @@
 <launch>
   <!-- Planners among obstacles they only know from /obstacle_observations.
        Driven by tests/observed_obstacles_test.py.
-         agents:=1|2      number of planners
+         agents:=1|2      number of planners (with 2 aerial robots also pass planner_bbox:=0.6, see
+                          _observed_agent.launch)
          ground:=true     rover limits and ground mode instead of aerial -->
   <arg name="agents" default="1"/>
   <arg name="ground" default="false"/>
   <arg name="dyn_enabled" default="true"/>
+  <arg name="delay_check" default="0.05"/>
+  <arg name="planner_bbox" default="0.35"/>
   <arg name="dyn_mode" default="reachable"/>
   <arg name="obst_max_vel" default="0.5"/>
+  <arg name="obst_max_acc" default="1.0"/>
+  <arg name="obst_velocity_error" default="0.1"/>
   <arg name="hover_avoidance" default="false"/>
   <arg name="heat_weight" default="5.0"/>
   <arg name="max_horizon" default="4.0"/>
@@ -20,8 +25,12 @@
     <arg name="ns" value="SQ01s"/>
     <arg name="ground" value="$(arg ground)"/>
     <arg name="dyn_enabled" value="$(arg dyn_enabled)"/>
+    <arg name="delay_check" value="$(arg delay_check)"/>
+    <arg name="planner_bbox" value="$(arg planner_bbox)"/>
     <arg name="dyn_mode" value="$(arg dyn_mode)"/>
     <arg name="obst_max_vel" value="$(arg obst_max_vel)"/>
+    <arg name="obst_max_acc" value="$(arg obst_max_acc)"/>
+    <arg name="obst_velocity_error" value="$(arg obst_velocity_error)"/>
     <arg name="hover_avoidance" value="$(arg hover_avoidance)"/>
     <arg name="heat_weight" value="$(arg heat_weight)"/>
     <arg name="max_horizon" value="$(arg max_horizon)"/>
@@ -34,8 +43,12 @@
     <arg name="ns" value="SQ02s"/>
     <arg name="ground" value="$(arg ground)"/>
     <arg name="dyn_enabled" value="$(arg dyn_enabled)"/>
+    <arg name="delay_check" value="$(arg delay_check)"/>
+    <arg name="planner_bbox" value="$(arg planner_bbox)"/>
     <arg name="dyn_mode" value="$(arg dyn_mode)"/>
     <arg name="obst_max_vel" value="$(arg obst_max_vel)"/>
+    <arg name="obst_max_acc" value="$(arg obst_max_acc)"/>
+    <arg name="obst_velocity_error" value="$(arg obst_velocity_error)"/>
     <arg name="hover_avoidance" value="$(arg hover_avoidance)"/>
     <arg name="heat_weight" value="$(arg heat_weight)"/>
     <arg name="max_horizon" value="$(arg max_horizon)"/>

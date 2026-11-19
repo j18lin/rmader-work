@@ -571,6 +571,27 @@ struct dynTrajCompiled
 //   bool is_static;
 // };
 
+// What to do about a teammate whose messages stop arriving. R-MADER's guarantee needs every plan to arrive
+// within the delay-check time and "does not handle complete communication drops"; upstream keeps trusting
+// the last trajectory it received, forever.
+struct peerSilence
+{
+  bool enabled = false;
+  double heartbeat_period = 0.1;  // [s] every planner announces itself this often on /rmader_heartbeat
+  // Nothing from a teammate for this long: stop committing new plans. The committed one ends at rest and was
+  // checked against everything that teammate had published.
+  double hold_after = 0.3;        // [s]
+  // Nothing for this long: stop trusting its last trajectory. From then on it is an obstacle that was where
+  // that trajectory put it when it was last heard, and may have moved at up to peer_max_vel since (SANDO's
+  // reachable set, with a bound that is known because it is one of ours).
+  double silent_after = 1.0;      // [s]
+  double peer_max_vel = -1.0;     // [m/s] per axis. Negative: this planner's own v_max
+  // A silent teammate's box grows without end, so a teammate that is gone for good eventually blocks
+  // everything. Forget it (stop avoiding it altogether) after this long. 0: never, the safe choice.
+  double forget_after = 0.0;      // [s]
+  bool fault_injection = false;   // tests only: obey ~sim_comm_fault (1 = deaf, 2 = mute, 3 = both)
+};
+
 struct parameters
 {
   // Ground robot mode constrains the optimized path to forward motion and
@@ -661,6 +682,7 @@ struct parameters
   bool is_stuck = false;
 
   dynobs::Params dyn;  // observation-based dynamic obstacles (dyn_obstacles/* in rmader.yaml)
+  peerSilence peer_silence;  // peer_silence/* in rmader.yaml
 };
 
 typedef std::vector<mt::state> trajectory;

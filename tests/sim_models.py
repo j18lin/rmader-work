@@ -30,6 +30,7 @@ class Wanderer:
         self.low = low
         self.high = high
         self.max_speed = max_speed
+        self.velocity = [0.0, 0.0, 0.0]
         self.position = self._sample()
         self._retarget()
 
@@ -46,9 +47,33 @@ class Wanderer:
         travel = self.speed * dt
         if remaining <= travel:
             self.position = list(self.target)
+            self.velocity = [0.0, 0.0, 0.0]
             self._retarget()
         else:
+            self.velocity = [o * self.speed / remaining for o in offset]
             self.position = [p + o * travel / remaining for p, o in zip(self.position, offset)]
+
+
+class SmoothWanderer(Wanderer):
+    """A Wanderer whose velocity can only change at a bounded rate on each axis, like a vehicle."""
+
+    def __init__(self, rng, low, high, max_speed, max_acceleration):
+        super().__init__(rng, low, high, max_speed)
+        self.max_acceleration = max_acceleration
+        self.velocity = [0.0, 0.0, 0.0]
+
+    def step(self, dt, _elapsed):
+        offset = [t - p for t, p in zip(self.target, self.position)]
+        remaining = math.sqrt(sum(value * value for value in offset))
+        if remaining < 0.3:
+            self._retarget()
+            return
+        # Per axis, so that both the speed and the acceleration bound hold per axis, as the planner assumes.
+        limit = self.max_acceleration * dt
+        for axis in range(3):
+            wanted = max(-self.max_speed, min(self.max_speed, offset[axis] * self.speed / remaining))
+            self.velocity[axis] += max(-limit, min(limit, wanted - self.velocity[axis]))
+            self.position[axis] += self.velocity[axis] * dt
 
 
 class Charger:

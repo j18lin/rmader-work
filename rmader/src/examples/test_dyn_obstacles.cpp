@@ -180,6 +180,74 @@ void testReachableBoxContainsAnyBoundedMotion()
   check(checked == 2000 * 80, "reachable-set property was exercised");
 }
 
+// ACCEL_BOUNDED: an obstacle whose acceleration and speed stay within their bounds, observed with bounded
+// position and velocity errors, never leaves the box, whatever it does.
+void testAccelBoundedContainsAnyBoundedMotion()
+{
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> unit(-1.0, 1.0);
+  std::uniform_real_distribution<double> zero_one(0.0, 1.0);
+
+  dynobs::Params par;
+  par.mode = dynobs::Mode::ACCEL_BOUNDED;
+  par.obst_max_vel = 0.8;
+  par.obst_max_acc = 1.5;
+  par.obst_position_error = 0.05;
+  par.obst_velocity_error = 0.1;
+  dynobs::Params reachable = par;
+  reachable.mode = dynobs::Mode::REACHABLE;
+  const Eigen::Vector3d margin = Eigen::Vector3d::Constant(par.obst_position_error);
+
+  int checked = 0;
+  double tightest_ratio = 1.0;
+  for (int trial = 0; trial < 2000; trial++)
+  {
+    Eigen::Vector3d truth(unit(rng) * 5, unit(rng) * 5, unit(rng) * 2);
+    Eigen::Vector3d velocity(unit(rng), unit(rng), unit(rng));
+    velocity *= par.obst_max_vel;
+
+    dynobs::Track track;
+    track.id = 1;
+    track.stamp = 100.0;
+    track.pos = truth + Eigen::Vector3d(unit(rng), unit(rng), unit(rng)) * par.obst_position_error;
+    track.vel = velocity + Eigen::Vector3d(unit(rng), unit(rng), unit(rng)) * par.obst_velocity_error;
+    track.max_vel = par.obst_max_vel;
+    track.is_dynamic = true;
+
+    // Adversarial: every 20 ms each axis accelerates flat out one way or the other, or not at all.
+    const double dt = 0.02;
+    double t = track.stamp;
+    for (int step = 0; step < 200; step++)
+    {
+      for (int i = 0; i < 3; i++)
+      {
+        const double roll = zero_one(rng);
+        const double acc = (roll < 0.45) ? par.obst_max_acc : ((roll < 0.9) ? -par.obst_max_acc : 0.0);
+        const double next = std::min(std::max(velocity[i] + acc * dt, -par.obst_max_vel), par.obst_max_vel);
+        truth[i] += 0.5 * (velocity[i] + next) * dt;
+        velocity[i] = next;
+      }
+      t += dt;
+      if (step % 5 != 4)
+      {
+        continue;
+      }
+      const double t_a = track.stamp + zero_one(rng) * (t - track.stamp);
+      const dynobs::Box box = dynobs::centerBox(track, t_a, t, par, margin);
+      check(box.contains(truth, 1e-9), "bounded acceleration stays inside the accel-bounded box");
+      const dynobs::Box outer = dynobs::centerBox(track, t_a, t, reachable, margin);
+      check(inside(box, outer), "accel-bounded box never exceeds the reachable box");
+      if (std::fabs(t - track.stamp - 0.5) < 1e-6)
+      {
+        tightest_ratio = std::min(tightest_ratio, (box.hi - box.lo).prod() / (outer.hi - outer.lo).prod());
+      }
+      checked++;
+    }
+  }
+  check(checked == 2000 * 40, "accel-bounded property was exercised");
+  check(tightest_ratio < 0.5, "half a second ahead the accel-bounded box can be much smaller");
+}
+
 void testBoxes()
 {
   dynobs::Params par;
@@ -402,6 +470,7 @@ void testModeNames()
   dynobs::Mode mode = dynobs::Mode::PREDICTED;
   check(dynobs::modeFromString("reachable", mode) && mode == dynobs::Mode::REACHABLE, "reachable parses");
   check(dynobs::modeFromString("predicted", mode) && mode == dynobs::Mode::PREDICTED, "predicted parses");
+  check(dynobs::modeFromString("accel_bounded", mode) && mode == dynobs::Mode::ACCEL_BOUNDED, "accel_bounded parses");
   check(!dynobs::modeFromString("optimistic", mode), "unknown mode is rejected");
 }
 }  // namespace
@@ -411,6 +480,7 @@ int main()
   testTracker();
   testVelocityEstimateWithNoise();
   testReachableBoxContainsAnyBoundedMotion();
+  testAccelBoundedContainsAnyBoundedMotion();
   testBoxes();
   testHeat();
   testGlobalPath();

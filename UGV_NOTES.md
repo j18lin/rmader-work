@@ -183,6 +183,14 @@ disabled, which is the default, the planner takes none of the new paths.
   whatever it does. The boxes go through the same convex-hull, A*,
   optimisation and delay-check path as every other obstacle, and R-MADER's
   per-interval hulls play the role of SANDO's time layers.
+- **Or bounds it more tightly** (`mode: accel_bounded`). If each component of
+  the obstacle's acceleration also stays within `obst_max_acc`, it can only
+  get as far as accelerating flat out from its current velocity allows. The
+  box is then centred on where the obstacle is heading and at first grows
+  with time squared. It is never larger than the `reachable` box and comes
+  with the same kind of guarantee under that one extra assumption, plus a
+  bound on the velocity estimate's error (`obst_velocity_error`). A person
+  can turn on the spot and breaks it; a vehicle with known limits does not.
 - **Chooses where to aim** (`global_path`). Upstream always aims at the point
   `Ra` along the straight line to the goal, so it cannot go around a large
   blocked region. Following the paper's Section V, a grid A* now runs from the
@@ -259,7 +267,7 @@ The heat map is also added to the cost of R-MADER's own control-point A*
 | Corridors and optimiser | Convex-decomposition polytopes per layer and path segment, MIQP with variable elimination | Not ported. R-MADER's separating planes and NLopt are used as they were |
 | Unknown space | Unknown-region boundaries inflated by the same `r_n` | Not ported: there is no map of unknown space, so an obstacle that has not been observed is not protected against |
 | Tracker | Point cloud, temporal occupancy grid, clustering, adaptive EKF | Observations arrive ready-made; windowed finite difference and low-pass filter |
-| `predicted` mode | Named as future work | Extension: box follows the constant-velocity prediction. Tighter, no guarantee |
+| Tighter sets from prediction | Named as future work | `accel_bounded`: bounded acceleration from the estimated velocity, clipped to the reachable box. `predicted`: box follows the constant-velocity prediction, no guarantee |
 | Stepping aside, escaping | Hover avoidance is in the released configuration, not in the paper | Own implementation |
 | `planning_margin`, `stop_dwell`, replanning at GOAL_SEEN, turn on the spot | Not applicable | Added to fit R-MADER's delay check, status machine and ground mode |
 
@@ -274,7 +282,8 @@ unicycles at 0.55 m/s that turn on the spot when asked.
 - `crossing`: one aerial robot shuttles 8 m while three 0.6 m obstacles wander
   through its corridor at up to 0.5 m/s, each heading for a new random
   waypoint at a new random speed whenever it arrives.
-- `crossing2`: two aerial robots swap ends through that corridor.
+- `crossing2`: two aerial robots swap ends through that corridor (planner
+  box 0.6 m, see the results).
 - `hover`: an aerial robot is parked at its goal and an obstacle drives
   straight through that spot at 0.4 m/s.
 - `ground`: one rover shuttles 10 m across a 15 m arena in which two obstacles
@@ -304,8 +313,10 @@ at up to 0.25 m/s.
 | crossing | 7 | 1.08 m | n/a | 7 | none |
 | crossing | 11 | 1.12 m | n/a | 6 | none |
 | crossing | 23 | 0.92 m | n/a | 7 | none |
-| crossing2 | 7 | 1.06 m | 0.20 m | 5 and 5 | none |
-| crossing2 | 11 | 1.02 m | 0.01 m | 4 and 5 | none |
+| crossing2 | 7 | 1.01 m | 0.13 m | 3 and 3 | none |
+| crossing2 | 14 | 1.13 m | 0.06 m | 3 and 3 | none |
+| crossing2 | 21 | 0.83 m | 0.69 m | 4 and 4 | none |
+| crossing2 | 28 | 1.13 m | 0.48 m | 3 and 3 | none |
 | hover | n/a | 1.51 m | n/a | stepped aside, back within 0.01 m | none |
 | ground | 7 | 1.13 m | n/a | 4 | none |
 | ground | 11 | 1.20 m | n/a | 2 | none |
@@ -318,11 +329,39 @@ at up to 0.25 m/s.
 | ground, feature off | 7 | -0.50 m | n/a | 3 | 11.0 s |
 | bridge, feature off | 7 | -0.40 m | 0.89 m | 1 and 1 | 8.8 s |
 
-Twelve runs with the feature on, no overlap with any obstacle; the four
+Fourteen runs with the feature on, no overlap with any obstacle; the four
 controls all collide. That is evidence that the pieces work together in these
 scenarios, not a collision rate. The bridge run delivered 3,364 obstacle rows.
-Robot-to-robot gaps of a few centimetres are R-MADER's own inter-agent
-spacing: it separates the two boxes and nothing more.
+
+Robot-to-robot spacing is R-MADER's own job and none of this changes it, but
+the two-robot aerial test exposed how thin it is: R-MADER separates two
+teammates' boxes exactly, with no allowance for a vehicle lagging its
+setpoints. With the planner's box equal to the vehicle's 0.35 m, the two
+robots passing head-on overlapped by 1 to 14 cm in five of ten runs, without
+ever touching an obstacle. The `crossing2` rows above use a 0.6 m planner box
+(0.125 m of tracking allowance per side) and scored against the 0.35 m
+vehicle; with 0.5 m one run in four still overlapped by 1 cm. The rover runs
+did not need this.
+
+`accel_bounded` against `reachable`, on obstacles whose acceleration really
+is limited to 0.2 m/s² per axis and which report their velocity
+(`--obstacle-acceleration 0.2 --report-velocity`), one aerial robot, 60 s:
+
+| Seed | `reachable` | `accel_bounded` |
+| --- | --- | --- |
+| 7 | 7 legs, 1.05 m | 8 legs, 0.74 m |
+| 11 | 6 legs, 1.25 m | 7 legs, 0.94 m |
+| 23 | 6 legs, 1.28 m | 7 legs, 0.84 m |
+
+No overlap in any of the six. The tighter boxes buy about one leg in seven
+here and far fewer waits; the gain is small because the heat map and the
+safe-to-stop rule dominate, and it shrinks further as the velocity estimate
+gets worse.
+
+The whole suite (`cloud/run_tests.sh`, seed 7 of each scenario) was then run
+once on the final build: every observed-obstacle, bridge and link-drop check
+passed except `crossing2`, which at that point still used the 0.35 m planner
+box and deadlocked nose to nose; it passed when rerun with the allowance.
 
 Rover legs are 10 m and take between 25 s and 90 s, against about 25 s with
 nothing in the way: at barely twice the obstacles' speed the rover spends
@@ -376,9 +415,77 @@ reproduced here.
   the turn-on-the-spot request.
 - The Gurobi backend was not built or run here; the heat cost in the
   control-point A* is compiled out of it.
+- The planner's box has to include tracking error. R-MADER keeps teammates'
+  boxes exactly apart and nothing more.
+- `accel_bounded` depends on two more numbers than `reachable`, the
+  acceleration bound and the velocity estimate's error bound, and is only as
+  good as they are.
 - Two upstream bugs surfaced and are fixed: `dynTraj2dynTrajCompiled` never
   copied `is_agent`, so the planner read an uninitialised flag; and the
   ground-mode A* division by zero described above.
+
+## A teammate that stops talking
+
+R-MADER's guarantee needs every plan to reach the other robots within the
+delay-check time, and the paper says it "does not handle complete
+communication drops". What upstream actually does when a link drops is keep
+planning around the last trajectory it received from that teammate, for as
+long as it stays in its local map, and forget the teammate altogether once
+that trajectory stops mattering. `peer_silence/enabled: true` replaces that
+with SANDO's idea applied to a teammate. It is not in either paper.
+
+- Every planner sends a heartbeat on `/rmader_heartbeat` every
+  `heartbeat_period`, so that a teammate with nothing new to say is not
+  mistaken for a broken link. Teammates are remembered separately from the
+  local map.
+- **Hold.** Nothing from a teammate for `hold_after` (0.3 s): commit no new
+  plan. The committed plan ends at rest and was checked against everything
+  that teammate had published.
+- **Silent.** Nothing for `silent_after` (1 s): stop trusting its last
+  trajectory. From then on it is an obstacle that was on that trajectory when
+  last heard and may have moved at up to `peer_max_vel` on each axis since.
+  That is SANDO's reachable set with a bound that is known, because the
+  teammate is one of ours.
+- As soon as anything arrives from it, it is a teammate again.
+
+What this gives and what it does not:
+
+- It degrades to a stop, it does not keep the team working. A silent
+  teammate's box grows at its top speed, so robots at 2 m/s are boxed in
+  within a second or two and stay put until the link returns. Slow robots
+  get more room for longer.
+- Plans committed in the first `hold_after` after a link fails were made
+  without knowing it had failed. That window is not covered.
+- A teammate that never comes back blocks everything eventually.
+  `forget_after` gives up on it after a set time; the default is never.
+- There is no proof. The argument is that once both sides are silent to each
+  other, each stays out of everywhere the other can be, and each is
+  somewhere it can be.
+
+`tests/peer_silence_test.py` swaps two aerial robots end for end, with the
+geometry of the two-agent timing test, and makes one of them deaf, mute or
+both for 15 s through a test-only topic (`peer_silence/fault_injection`).
+
+| Run | Before the fault | While the link was down | After |
+| --- | --- | --- | --- |
+| deaf and mute, feature on | 0.29 m apart | both stopped (0.00 m/s), 3.3 m apart | 0.10 m, 2 more swaps |
+| deaf and mute, feature on | 0.08 m | stopped (0.01 m/s), 1.97 m | 0.03 m, 2 more swaps |
+| deaf only, feature on | 0.12 m | 0.11 m (the hearing robot kept going) | 0.10 m, 2 more swaps |
+| mute only, feature on | 0.24 m | 3.57 m | 0.01 m, 3 more swaps |
+| feature off | 0.06 m | kept flying at 0.8 m/s, 0.33 m | 0.17 m |
+| feature off | 0.04 m | kept flying at 1.4 m/s, overlapped by 4 cm | overlapped by 30 cm |
+
+Distances are box-to-box. With the feature on the robots stopped and stayed
+apart in every run and carried on afterwards. Without it they always kept
+flying while unable to hear each other. Whether they then touched depended on
+small differences between their paths: one of these two runs, none of three
+more on an earlier build, and one earlier run on a longer line. The small gaps
+before and after the fault are plain R-MADER with a 0.35 m planner box, as
+described above.
+
+Not run: more than two robots, ground mode, and a silent teammate together
+with observed obstacles.
+
 
 ## Aerial precursor
 

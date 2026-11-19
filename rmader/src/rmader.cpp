@@ -177,6 +177,17 @@ void Rmader::updateTrajObstacles_with_delaycheck(mt::dynTraj traj)
 
   // std::cout << "bef mtx_trajs_.lock() in updateTrajObstacles" << std::endl;
   mtx_trajs_.lock();
+
+  if (traj.is_agent)
+  {
+    Peer& peer = peers_[traj.id];
+    peer.last_heard = std::max(peer.last_heard, traj.time_received);
+    if (traj.is_committed)
+    {
+      peer.last_committed = traj_compiled;
+      peer.has_trajectory = true;
+    }
+  }
   // std::cout << "aft mtx_trajs_.lock() in updateTrajObstacles" << std::endl;
 
   // if (exists_in_local_map && traj.is_committed)
@@ -282,6 +293,17 @@ void Rmader::updateTrajObstacles(mt::dynTraj traj)
   mt::dynTrajCompiled traj_compiled;
   dynTraj2dynTrajCompiled(traj, traj_compiled);
 
+  if (traj.is_agent)
+  {
+    Peer& peer = peers_[traj.id];
+    peer.last_heard = std::max(peer.last_heard, traj.time_received);
+    if (traj.is_committed)
+    {
+      peer.last_committed = traj_compiled;
+      peer.has_trajectory = true;
+    }
+  }
+
   if (exists_in_local_map)
   {  // if that object already exists, substitute its trajectory
     *obs_ptr = traj_compiled;
@@ -332,6 +354,95 @@ void Rmader::updateTrajObstacles(mt::dynTraj traj)
 
   have_received_trajectories_while_checking_ = false;
   // std::cout << bold << blue << "updateTrajObstacles took " << tmp_t << reset << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// Teammates that stop talking (see mt::peerSilence)
+// ---------------------------------------------------------------------------
+
+void Rmader::notePeerHeard(int id, double time)
+{
+  mtx_trajs_.lock();
+  Peer& peer = peers_[id];
+  peer.last_heard = std::max(peer.last_heard, time);
+  mtx_trajs_.unlock();
+}
+
+bool Rmader::holdForQuietPeers()
+{
+  if (!par_.peer_silence.enabled)
+  {
+    return false;
+  }
+  const double now = ros::Time::now().toSec();
+  bool hold = false;
+
+  mtx_trajs_.lock();
+  silent_peers_.clear();
+  for (auto it = peers_.begin(); it != peers_.end();)
+  {
+    const int id = it->first;
+    Peer& peer = it->second;
+    const double age = now - peer.last_heard;
+
+    if (par_.peer_silence.forget_after > 0.0 && age > par_.peer_silence.forget_after)
+    {
+      trajs_.erase(std::remove_if(trajs_.begin(), trajs_.end(),
+                                  [&](const mt::dynTrajCompiled& traj) { return traj.is_agent && traj.id == id; }),
+                   trajs_.end());
+      it = peers_.erase(it);
+      continue;
+    }
+    if (age > par_.peer_silence.silent_after)
+    {
+      silent_peers_.insert(id);
+      // Its trajectory may have been dropped from the local map while it did not matter. It matters now.
+      const bool in_local_map = std::any_of(trajs_.begin(), trajs_.end(), [&](const mt::dynTrajCompiled& traj) {
+        return traj.is_agent && traj.id == id;
+      });
+      if (!in_local_map && peer.has_trajectory)
+      {
+        trajs_.push_back(peer.last_committed);
+      }
+    }
+    else if (age > par_.peer_silence.hold_after)
+    {
+      hold = true;
+    }
+    ++it;
+  }
+  mtx_trajs_.unlock();
+  return hold;
+}
+
+std::vector<int> Rmader::getSilentPeers()
+{
+  mtx_trajs_.lock();
+  std::vector<int> ids(silent_peers_.begin(), silent_peers_.end());
+  mtx_trajs_.unlock();
+  return ids;
+}
+
+// Everywhere a silent teammate can be during [t_start, t_end]: it was on the trajectory we hold when we last
+// heard from it, and since then it may have committed to anything its speed limit allows.
+dynobs::Box Rmader::silentPeerBox(mt::dynTrajCompiled& traj, double t_start, double t_end)
+{
+  auto known = peers_.find(traj.id);
+  const double t_heard = (known == peers_.end()) ? traj.time_received : known->second.last_heard;
+
+  dynobs::Track track;
+  track.id = traj.id;
+  track.stamp = t_heard;
+  track.pos = traj.pwp.eval(t_heard);
+  track.bbox = traj.bbox;
+  track.max_vel = (par_.peer_silence.peer_max_vel >= 0.0) ? par_.peer_silence.peer_max_vel : par_.v_max.maxCoeff();
+  track.is_dynamic = true;
+
+  dynobs::Params reachable = par_.dyn;
+  reachable.mode = dynobs::Mode::REACHABLE;
+  const Eigen::Vector3d margin =
+      traj.bbox / 2.0 + par_.drone_bbox / 2.0 + (par_.beta + par_.alpha) * Eigen::Vector3d::Ones();
+  return dynobs::centerBox(track, t_start, t_end, reachable, margin);
 }
 
 // ---------------------------------------------------------------------------
@@ -862,6 +973,10 @@ std::vector<Eigen::Vector3d> Rmader::vertexesOfInterval(mt::dynTrajCompiled& tra
 
     return points;
   }
+  else if (silent_peers_.count(traj.id) > 0)
+  {
+    return silentPeerBox(traj, t_start, t_end).vertexes();
+  }
   else
   {  // is an agent --> use the pwp field
 
@@ -983,6 +1098,13 @@ void Rmader::removeTrajsThatWillNotAffectMe(const mt::state& A, double t_start, 
   for (auto traj : trajs_)
   {
     bool traj_affects_me = false;
+
+    // A silent teammate has no trajectory to test: its box only grows, and nothing will re-add it later.
+    if (traj.is_agent && silent_peers_.count(traj.id) > 0)
+    {
+      local_trajs.push_back(traj);
+      continue;
+    }
 
     // STATIC OBSTACLES/AGENTS
     if (traj.is_static == true)
@@ -1710,6 +1832,12 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
     return false;
   }
 
+  if (holdForQuietPeers())
+  {
+    ROS_WARN_STREAM_THROTTLE(1.0, "A teammate has gone quiet: holding the committed plan");
+    return false;
+  }
+
   // Pop-up for demos
 
   // if (is_z_max_increased_ && !is_going_back_to_normal_z_max_){
@@ -2312,6 +2440,12 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
 
   if (isReplanningNeeded() == false)
   {
+    return false;
+  }
+
+  if (holdForQuietPeers())
+  {
+    ROS_WARN_STREAM_THROTTLE(1.0, "A teammate has gone quiet: holding the committed plan");
     return false;
   }
 

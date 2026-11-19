@@ -103,6 +103,23 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
     throw std::invalid_argument("ground_robot limits");
   }
 
+  // What to do about a teammate that stops talking (mt::peerSilence). Off by default.
+  nh1_.param("peer_silence/enabled", par_.peer_silence.enabled, false);
+  nh1_.param("peer_silence/heartbeat_period", par_.peer_silence.heartbeat_period, par_.peer_silence.heartbeat_period);
+  nh1_.param("peer_silence/hold_after", par_.peer_silence.hold_after, par_.peer_silence.hold_after);
+  nh1_.param("peer_silence/silent_after", par_.peer_silence.silent_after, par_.peer_silence.silent_after);
+  nh1_.param("peer_silence/peer_max_vel", par_.peer_silence.peer_max_vel, par_.peer_silence.peer_max_vel);
+  nh1_.param("peer_silence/forget_after", par_.peer_silence.forget_after, par_.peer_silence.forget_after);
+  nh1_.param("peer_silence/fault_injection", par_.peer_silence.fault_injection, false);
+  if (par_.peer_silence.enabled &&
+      (par_.peer_silence.heartbeat_period <= 0.0 || par_.peer_silence.hold_after < 2.0 * par_.peer_silence.heartbeat_period ||
+       par_.peer_silence.silent_after < par_.peer_silence.hold_after))
+  {
+    ROS_FATAL("Invalid peer_silence parameters: need heartbeat_period > 0, hold_after >= 2 * heartbeat_period and "
+              "silent_after >= hold_after");
+    throw std::invalid_argument("peer_silence parameters");
+  }
+
   // Observation-based dynamic obstacles. Optional so that parameter files written before this existed
   // keep working; everything defaults to upstream behaviour (disabled).
   std::string dyn_mode;
@@ -111,6 +128,8 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   nh1_.param("dyn_obstacles/obst_max_vel", par_.dyn.obst_max_vel, par_.dyn.obst_max_vel);
   nh1_.param("dyn_obstacles/obst_position_error", par_.dyn.obst_position_error, par_.dyn.obst_position_error);
   nh1_.param("dyn_obstacles/base_inflation", par_.dyn.base_inflation, par_.dyn.base_inflation);
+  nh1_.param("dyn_obstacles/obst_max_acc", par_.dyn.obst_max_acc, par_.dyn.obst_max_acc);
+  nh1_.param("dyn_obstacles/obst_velocity_error", par_.dyn.obst_velocity_error, par_.dyn.obst_velocity_error);
   nh1_.param("dyn_obstacles/prediction_horizon", par_.dyn.prediction_horizon, par_.dyn.prediction_horizon);
   nh1_.param("dyn_obstacles/prediction_growth", par_.dyn.prediction_growth, par_.dyn.prediction_growth);
   nh1_.param("dyn_obstacles/velocity_window", par_.dyn.velocity_window, par_.dyn.velocity_window);
@@ -143,7 +162,7 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   nh1_.param("dyn_obstacles/hover_avoidance/evasion_dist", par_.dyn.hover_evasion_dist, par_.dyn.hover_evasion_dist);
   nh1_.param("dyn_obstacles/hover_avoidance/is_2d", par_.dyn.hover_avoidance_2d, par_.dyn.hover_avoidance_2d);
   if (!dynobs::modeFromString(dyn_mode, par_.dyn.mode) || par_.dyn.obst_max_vel < 0.0 ||
-      par_.dyn.obst_position_error < 0.0 || par_.dyn.base_inflation < 0.0 || par_.dyn.prediction_horizon < 0.0 ||
+      par_.dyn.obst_position_error < 0.0 || par_.dyn.obst_max_acc < 0.0 || par_.dyn.obst_velocity_error < 0.0 || par_.dyn.base_inflation < 0.0 || par_.dyn.prediction_horizon < 0.0 ||
       par_.dyn.prediction_growth < 0.0 || par_.dyn.velocity_filter_alpha <= 0.0 ||
       par_.dyn.velocity_filter_alpha > 1.0 || par_.dyn.track_timeout <= 0.0 || par_.dyn.heat_weight < 0.0 || par_.dyn.heat_tau_ratio < 0.0 ||
       par_.dyn.heat_num_samples < 1 || par_.dyn.heat_max < 0.0 || par_.dyn.heat_horizon < 0.0 ||
@@ -151,7 +170,7 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
       par_.dyn.velocity_window < 0.0 || par_.dyn.planning_margin < 0.0 || par_.dyn.max_horizon < 0.0 || par_.dyn.stop_dwell < 0.0 ||
       par_.dyn.hover_evasion_dist <= 0.0 || par_.dyn.escape_dist <= 0.0)
   {
-    ROS_FATAL("Invalid dyn_obstacles parameters (mode must be \"reachable\" or \"predicted\")");
+    ROS_FATAL("Invalid dyn_obstacles parameters (mode must be \"reachable\", \"accel_bounded\" or \"predicted\")");
     throw std::invalid_argument("dyn_obstacles parameters");
   }
 
@@ -281,6 +300,19 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   // sub_mode_ = nh1_.subscribe("mode", 1, &RmaderRos::modeCB, this);
   sub_whoplans_ = nh1_.subscribe("who_plans", 1, &RmaderRos::whoPlansCB, this);
   sub_state_ = nh1_.subscribe("state", 1, &RmaderRos::stateCB, this);
+
+  // Heartbeats, so that a teammate with nothing new to say is not mistaken for a broken link
+  if (par_.peer_silence.enabled)
+  {
+    pub_heartbeat_ = nh1_.advertise<rmader_msgs::Heartbeat>("/rmader_heartbeat", 20);
+    sub_heartbeat_ = nh4_.subscribe("/rmader_heartbeat", 50, &RmaderRos::heartbeatCB, this);
+    heartbeatTimer_ =
+        nh2_.createTimer(ros::Duration(par_.peer_silence.heartbeat_period), &RmaderRos::heartbeatTimerCB, this);
+  }
+  if (par_.peer_silence.fault_injection)
+  {
+    sub_comm_fault_ = nh1_.subscribe("sim_comm_fault", 5, &RmaderRos::commFaultCB, this);
+  }
 
   // Obstacles that are only observed (no trajectory of their own to broadcast)
   if (par_.dyn.enabled)
@@ -427,6 +459,10 @@ void RmaderRos::trajCB(const rmader_msgs::DynTraj& msg)
   {  // This is my own trajectory
     return;
   }
+  if (msg.is_agent && (comm_fault_ & 1))
+  {
+    return;  // injected fault: deaf to teammates
+  }
 
   Eigen::Vector3d W_pos(msg.pos.x, msg.pos.y, msg.pos.z);  // position in world frame
   double dist = (state_.pos - W_pos).norm();
@@ -472,6 +508,33 @@ void RmaderRos::trajCB(const rmader_msgs::DynTraj& msg)
     rmader_ptr_->updateTrajObstacles(tmp);
     findAdaptiveDelayCheck(tmp);
   }
+}
+
+void RmaderRos::heartbeatTimerCB(const ros::TimerEvent& e)
+{
+  if (comm_fault_ & 2)
+  {
+    return;  // mute
+  }
+  rmader_msgs::Heartbeat msg;
+  msg.header.stamp = ros::Time::now();
+  msg.id = id_;
+  pub_heartbeat_.publish(msg);
+}
+
+void RmaderRos::heartbeatCB(const rmader_msgs::Heartbeat& msg)
+{
+  if (msg.id == id_ || (comm_fault_ & 1))
+  {
+    return;  // my own, or I am deaf
+  }
+  rmader_ptr_->notePeerHeard(msg.id, ros::Time::now().toSec());
+}
+
+void RmaderRos::commFaultCB(const std_msgs::Int8& msg)
+{
+  comm_fault_ = msg.data;
+  ROS_WARN("Injected communication fault set to %d (1 = deaf, 2 = mute, 3 = both)", static_cast<int>(msg.data));
 }
 
 void RmaderRos::obstacleObservationCB(const rmader_msgs::ObstacleObservation& msg)
@@ -553,6 +616,10 @@ void RmaderRos::findAdaptiveDelayCheck(const mt::dynTraj tmp)
 void RmaderRos::publishOwnTraj(const mt::PieceWisePol& pwp, const bool& is_committed,
                                std::vector<mt::dynTrajCompiled>& trajs)
 {
+  if (comm_fault_ & 2)
+  {
+    return;  // injected fault: mute
+  }
   std::vector<std::string> s;  // mu::pieceWisePol2String(pwp); The rest of the agents will use the pwp field, not the
                                // string
   s.push_back("");
@@ -599,6 +666,10 @@ void RmaderRos::publishOwnTraj(const mt::PieceWisePol& pwp, const bool& is_commi
 
 void RmaderRos::publishOwnTraj(const mt::PieceWisePol& pwp, const bool& is_committed)
 {
+  if (comm_fault_ & 2)
+  {
+    return;  // injected fault: mute
+  }
   std::vector<std::string> s;  // mu::pieceWisePol2String(pwp); The rest of the agents will use the pwp field, not the
                                // string
   s.push_back("");
@@ -733,6 +804,11 @@ void RmaderRos::replanCB(const ros::TimerEvent& e)
             delay_check_result_ = rmader_ptr_->delayCheck(pwp_now_, headsup_time);
           }
           // end of constant delay check *******************************************************
+        }
+        // A teammate that went quiet while this plan was being made may have a plan we never received.
+        if (delay_check_result_ && rmader_ptr_->holdForQuietPeers())
+        {
+          delay_check_result_ = false;
         }
         if (delay_check_result_)
         {

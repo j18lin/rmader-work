@@ -13,7 +13,9 @@
 #include <vector>
 #include "cgal_utils.hpp"
 
+#include <map>
 #include <mutex>
+#include <set>
 
 #include "rmader_types.hpp"
 
@@ -70,6 +72,12 @@ public:
   // Feeds one observation of an obstacle whose future motion is unknown (see dyn_obstacles.hpp).
   void updateObservedObstacle(const dynobs::Observation& obs);
   std::vector<dynobs::Track> getObservedTracks();
+  // Teammates that have gone quiet (peer_silence). notePeerHeard: any message from that teammate arrived.
+  // holdForQuietPeers: true while some teammate has been quiet for longer than hold_after but not yet
+  // silent_after; also refreshes which teammates count as silent. Both take mtx_trajs_.
+  void notePeerHeard(int id, double time);
+  bool holdForQuietPeers();
+  std::vector<int> getSilentPeers();
   bool isEvading();
 
   Eigen::Vector2d RotationMatrix(Eigen::Vector2d& vec, const double& angle);
@@ -280,6 +288,18 @@ private:
   Eigen::Matrix<double, 4, 4> A_rest_pos_basis_inverse_;
 
   separator::Separator* separator_solver_;
+
+  // Every teammate ever heard from. Kept apart from trajs_, which drops a teammate's trajectory as soon as it
+  // stops mattering and relies on the teammate publishing again to get it back: a silent one never will.
+  struct Peer
+  {
+    double last_heard = 0.0;
+    bool has_trajectory = false;
+    mt::dynTrajCompiled last_committed;
+  };
+  std::map<int, Peer> peers_;   // guarded by mtx_trajs_
+  std::set<int> silent_peers_;  // guarded by mtx_trajs_, refreshed by holdForQuietPeers
+  dynobs::Box silentPeerBox(mt::dynTrajCompiled& traj, double t_start, double t_end);
 
   dynobs::Tracker obs_tracker_;  // guarded by mtx_trajs_
   // Extra clearance around observed obstacles; non-zero only while building the hulls to plan against

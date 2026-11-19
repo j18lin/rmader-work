@@ -36,7 +36,7 @@ from rmader_msgs.msg import DynTraj, ObstacleObservation
 from snapstack_msgs.msg import Goal, State
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sim_models import Charger, Unicycle, Wanderer, box_gap, distance, vector_limit  # noqa: E402
+from sim_models import Charger, SmoothWanderer, Unicycle, Wanderer, box_gap, distance, vector_limit  # noqa: E402
 
 OBSERVATION_NOISE = 0.03      # [m] per-axis bound on the position error; matches dyn_obstacles/obst_position_error
 OBSERVATION_HZ = 20.0
@@ -148,8 +148,14 @@ class Robot:
         self.position, self.velocity, self.yaw = model.position, model.velocity, model.yaw
 
 
-def build_scenario(name, rng):
+def build_scenario(name, rng, obstacle_acceleration=0.0):
     """Returns (robots, obstacles, obstacle speed bound)."""
+
+    def wanderer(low, high, speed):
+        if obstacle_acceleration > 0.0:
+            return SmoothWanderer(rng, low, high, speed, obstacle_acceleration)
+        return Wanderer(rng, low, high, speed)
+
     if name in ("crossing", "crossing2"):
         height = 1.5
         west, east = (-4.0, 0.0, height), (4.0, 0.0, height)
@@ -157,7 +163,7 @@ def build_scenario(name, rng):
         if name == "crossing2":
             robots.append(Robot("SQ02s", east, [west, east]))
         speed = 0.5
-        obstacles = [Wanderer(rng, (-2.0, -0.7, height), (2.0, 0.7, height), speed) for _ in range(3)]
+        obstacles = [wanderer((-2.0, -0.7, height), (2.0, 0.7, height), speed) for _ in range(3)]
     elif name == "hover":
         height = 1.5
         home = (0.0, 0.0, height)
@@ -171,7 +177,7 @@ def build_scenario(name, rng):
         if name == "ground2":
             robots.append(Robot("SQ02s", south, [north, south], ground=True, yaw=math.pi / 2.0))
         speed = 0.25
-        obstacles = [Wanderer(rng, (-2.0, -2.0, 0.0), (2.0, 2.0, 0.0), speed) for _ in range(2)]
+        obstacles = [wanderer((-2.0, -2.0, 0.0), (2.0, 2.0, 0.0), speed) for _ in range(2)]
     return robots, obstacles, speed
 
 
@@ -183,6 +189,10 @@ def main():
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--min-legs", type=int, default=2, help="legs every robot has to complete")
     parser.add_argument("--no-obstacles", action="store_true", help="baseline: remove the obstacles")
+    parser.add_argument("--obstacle-acceleration", type=float, default=0.0,
+                        help="per-axis acceleration limit of the wandering obstacles [m/s^2]; 0 = they turn instantly")
+    parser.add_argument("--report-velocity", action="store_true",
+                        help="observations carry the obstacle's velocity (0.05 m/s noise per axis)")
     parser.add_argument("--report", default="test-results/observed_obstacles.json")
     parser.add_argument("--expect-collision", action="store_true",
                         help="control run with the feature disabled: pass only if the scenario collides")
@@ -190,7 +200,7 @@ def main():
 
     rospy.init_node("observed_obstacles_test", anonymous=False)
     rng = random.Random(args.seed)
-    robots, obstacles, obstacle_speed = build_scenario(args.scenario, rng)
+    robots, obstacles, obstacle_speed = build_scenario(args.scenario, rng, args.obstacle_acceleration)
     if args.no_obstacles:
         obstacles = []
     observation_pub = rospy.Publisher("/obstacle_observations", ObstacleObservation, queue_size=50)
@@ -213,7 +223,10 @@ def main():
             message.id = 4000 + index
             noisy = [value + rng.uniform(-OBSERVATION_NOISE, OBSERVATION_NOISE) for value in obstacle.position]
             message.pos.x, message.pos.y, message.pos.z = noisy
-            message.has_vel = False
+            message.has_vel = args.report_velocity and hasattr(obstacle, "velocity")
+            if message.has_vel:
+                noisy_velocity = [value + rng.uniform(-0.05, 0.05) for value in obstacle.velocity]
+                message.vel.x, message.vel.y, message.vel.z = noisy_velocity
             message.bbox.x, message.bbox.y, message.bbox.z = OBSTACLE_BBOX
             observation_pub.publish(message)
 

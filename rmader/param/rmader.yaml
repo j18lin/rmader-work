@@ -191,11 +191,16 @@ dyn_obstacles:
   enabled: false
   mode: "reachable"         # "reachable": SANDO's inflation. Box grows by obst_max_vel * time since last seen, so it
                             #              holds for any motion within the speed bound
+                            # "accel_bounded": not in the paper. Also uses obst_max_acc and the estimated velocity: the
+                            #              box is centred on where the obstacle is heading and at first grows with
+                            #              time squared. Same kind of guarantee, one more assumption
                             # "predicted": not in the paper. Constant-velocity prediction with a slowly growing box;
                             #              tighter, no guarantee
   obst_max_vel: 0.5         # [m/s] [v_max^obs] bound on each component of an obstacle's velocity
   obst_position_error: 0.05 # [m] [epsilon] bound on the per-axis error of an observed position
   base_inflation: 0.1       # [m] [r_margin] constant extra margin around every observed obstacle
+  obst_max_acc: 1.0         # [m/s2] accel_bounded mode: bound on each component of an obstacle's acceleration
+  obst_velocity_error: 0.1  # [m/s] accel_bounded mode: bound on the per-axis error of the velocity estimate
   prediction_horizon: 1.0   # [s] [T_h] length of the constant-velocity prediction (heat map, predicted mode, hover avoidance)
   prediction_growth: 0.2    # [m/s] predicted mode: growth rate of the box along the prediction
   velocity_window: 0.5      # [s] velocity = change of position over this long (robust to observation noise)
@@ -237,3 +242,22 @@ dyn_obstacles:
     trigger_dist: 4.0       # [m] evade when its predicted path comes this close
     evasion_dist: 3.0       # [m] how far to move; the agent returns once the goal is clear
     is_2d: true             # keep the evasion in the horizontal plane
+
+###############################################################
+# Teammates that stop talking
+###############################################################
+# R-MADER's guarantee needs every plan to arrive within delay_check_sec and does not cover a link that
+# drops. Upstream keeps trusting the last trajectory it received from a teammate, forever. With this on,
+# every planner sends a heartbeat on /rmader_heartbeat and reacts to a teammate going quiet in two steps.
+# Not in either paper; see UGV_NOTES.md, "A teammate that stops talking".
+
+peer_silence:
+  enabled: false
+  heartbeat_period: 0.1     # [s]
+  hold_after: 0.3           # [s] nothing from a teammate for this long: commit no new plan (the committed one ends at rest)
+  silent_after: 1.0         # [s] nothing for this long: it becomes an obstacle that was on its last trajectory when last
+                            #     heard and may have moved at up to peer_max_vel since (SANDO's reachable set)
+  peer_max_vel: -1.0        # [m/s] per axis. Negative --> this planner's own v_max
+  forget_after: 0.0         # [s] stop avoiding a teammate that has been silent this long. 0.0 --> never (its box
+                            #     keeps growing, so a teammate that is gone for good ends up blocking everything)
+  fault_injection: false    # tests only: obey ~sim_comm_fault (std_msgs/Int8: 1 = deaf, 2 = mute, 3 = both)

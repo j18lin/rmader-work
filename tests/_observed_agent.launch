@@ -4,8 +4,15 @@
   <arg name="agents_ids" default="[1, 2]"/>
   <arg name="ground" default="false"/>
   <arg name="dyn_enabled" default="true"/>
+  <arg name="delay_check" default="0.05"/>
+  <!-- Side of the box the planner keeps clear around an aerial robot. The tests score with the vehicle's
+       0.35 m box. R-MADER separates two teammates' boxes exactly, so with 0.35 here two robots passing
+       head-on end up a few centimetres either side of touching once tracking error is added. -->
+  <arg name="planner_bbox" default="0.35"/>
   <arg name="dyn_mode" default="reachable"/>
   <arg name="obst_max_vel" default="0.5"/>
+  <arg name="obst_max_acc" default="1.0"/>
+  <arg name="obst_velocity_error" default="0.1"/>
   <arg name="hover_avoidance" default="false"/>
   <arg name="heat_weight" default="5.0"/>
   <arg name="max_horizon" default="4.0"/>
@@ -20,14 +27,14 @@
       <rosparam param="agents_ids" subst_value="true">$(arg agents_ids)</rosparam>
       <param name="visual/is_visual" value="false"/>
       <param name="is_replan_after_goal_reached" value="true"/>
-      <param name="tuning_param/delay_check_sec" value="0.05"/>
+      <param name="tuning_param/delay_check_sec" value="$(arg delay_check)"/>
       <param name="tuning_param/simulated_comm_delay_sec" value="0.05"/>
 
       <!-- Aerial: same limits as tests/two_agent.launch -->
       <rosparam unless="$(arg ground)" param="tuning_param/v_max">[2.0, 2.0, 2.0]</rosparam>
       <rosparam unless="$(arg ground)" param="tuning_param/a_max">[4.0, 4.0, 4.0]</rosparam>
       <rosparam unless="$(arg ground)" param="tuning_param/j_max">[8.0, 8.0, 8.0]</rosparam>
-      <rosparam unless="$(arg ground)" param="tuning_param/drone_bbox">[0.35, 0.35, 0.35]</rosparam>
+      <rosparam unless="$(arg ground)" param="tuning_param/drone_bbox" subst_value="true">[$(arg planner_bbox), $(arg planner_bbox), $(arg planner_bbox)]</rosparam>
       <param unless="$(arg ground)" name="tuning_param/Ra" value="6.0"/>
 
       <!-- Ground: same limits as integration/rover_sim.launch -->
@@ -47,6 +54,8 @@
       <param name="dyn_obstacles/enabled" value="$(arg dyn_enabled)"/>
       <param name="dyn_obstacles/mode" value="$(arg dyn_mode)"/>
       <param name="dyn_obstacles/obst_max_vel" value="$(arg obst_max_vel)"/>
+      <param name="dyn_obstacles/obst_max_acc" value="$(arg obst_max_acc)"/>
+      <param name="dyn_obstacles/obst_velocity_error" value="$(arg obst_velocity_error)"/>
       <param name="dyn_obstacles/obst_position_error" value="0.03"/>
       <param name="dyn_obstacles/heat/weight" value="$(arg heat_weight)"/>
       <param name="dyn_obstacles/max_horizon" value="$(arg max_horizon)"/>

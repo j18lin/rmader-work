@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run every check that works without Docker, Gazebo or a Gurobi license:
-# the unit tests, then the closed-loop ROS tests (about 20 minutes).
+# the unit tests, then the closed-loop ROS tests (about 25 minutes).
 # RUN_EXPERIMENTAL=1 adds the predicted-mode run.
 #
 #   cloud/run_tests.sh [results dir]      # default: test-results/cloud
@@ -39,10 +39,15 @@ drv=tests/observed_obstacles_test.py
 
 # Aerial: one and two planners among three erratic obstacles, and the stopped-at-goal case.
 closed_loop crossing_reachable "$obs" "escape:=true" "$drv" --scenario crossing --duration 60
-closed_loop crossing_two_robots "$obs" "agents:=2 escape:=true" "$drv" --scenario crossing2 --duration 60
+# planner_bbox: 0.125 m of tracking allowance around the 0.35 m vehicle box, so that teammates stay apart too
+closed_loop crossing_two_robots "$obs" "agents:=2 escape:=true planner_bbox:=0.6" "$drv" --scenario crossing2 --duration 60
 closed_loop crossing_control "$obs" "dyn_enabled:=false" "$drv" --scenario crossing --duration 60 --expect-collision
 closed_loop hover_avoidance "$obs" "hover_avoidance:=true" "$drv" --scenario hover --duration 45
 closed_loop hover_control "$obs" "hover_avoidance:=false" "$drv" --scenario hover --duration 45 --expect-collision
+
+# Acceleration-bounded boxes, on obstacles that really are sluggish (0.2 m/s^2) and report their velocity.
+closed_loop crossing_accel_bounded "$obs" "escape:=true dyn_mode:=accel_bounded obst_max_acc:=0.2 obst_velocity_error:=0.1" \
+  "$drv" --scenario crossing --duration 60 --obstacle-acceleration 0.2 --report-velocity
 
 # Ground mode at rover limits (0.55 m/s) among obstacles at 0.25 m/s, with the settings rover_sim.launch uses.
 rover="ground:=true obst_max_vel:=0.25 stop_dwell:=4.0 hover_avoidance:=true evade_trigger:=3.0 escape:=true"
@@ -53,6 +58,10 @@ closed_loop ground_control "$obs" "ground:=true dyn_enabled:=false" "$drv" --sce
 # The real rover launch file and bridge script, with this side playing the simulator over TCP.
 closed_loop bridge integration/rover_sim.launch "dyn_obstacles:=true" tests/bridge_obstacles_test.py --duration 180
 closed_loop bridge_control integration/rover_sim.launch "" tests/bridge_obstacles_test.py --duration 60 --expect-collision
+
+# A teammate that stops talking: the link between two planners is cut for 15 s.
+closed_loop peer_silence tests/peer_silence.launch "peer_silence:=true" tests/peer_silence_test.py
+closed_loop peer_silence_control tests/peer_silence.launch "peer_silence:=false" tests/peer_silence_test.py --control
 
 if test "${RUN_EXPERIMENTAL:-0}" = 1; then
   # predicted mode gives no guarantee and has collided in about one run in three

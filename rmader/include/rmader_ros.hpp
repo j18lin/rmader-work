@@ -26,6 +26,9 @@
 #include <rmader_msgs/MissedMsgsCnt.h>
 #include <rmader_msgs/Trajs.h>
 #include <rmader_msgs/ObstacleObservation.h>
+#include <rmader_msgs/Heartbeat.h>
+#include <std_msgs/Int8.h>
+#include <atomic>
 
 #include "utils.hpp"
 #include "rmader.hpp"
@@ -60,6 +63,9 @@ private:
   void replanCB(const ros::TimerEvent& e);
   void trajCB(const rmader_msgs::DynTraj& msg);
   void obstacleObservationCB(const rmader_msgs::ObstacleObservation& msg);
+  void heartbeatCB(const rmader_msgs::Heartbeat& msg);
+  void heartbeatTimerCB(const ros::TimerEvent& e);
+  void commFaultCB(const std_msgs::Int8& msg);
   void allTrajsTimerCB(const ros::TimerEvent& e);
   void visual(mt::Edges& edges_obstacles, std::vector<mt::state>& traj_plan, const bool& is_committed);
 
@@ -135,6 +141,12 @@ private:
   ros::Subscriber sub_state_;
   ros::Subscriber sub_cent_traj_;
   ros::Subscriber sub_obstacle_obs_;
+  ros::Subscriber sub_heartbeat_;
+  ros::Subscriber sub_comm_fault_;
+  ros::Publisher pub_heartbeat_;
+  ros::Timer heartbeatTimer_;
+  // peer_silence/fault_injection: bit 0 = deaf (teammates' messages are dropped), bit 1 = mute (nothing is sent)
+  std::atomic<int> comm_fault_{ 0 };
 
   // subscribers for each agent
   std::vector<ros::Subscriber> sub_traj_;
