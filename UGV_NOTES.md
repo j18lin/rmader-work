@@ -162,17 +162,18 @@ obstacle's future trajectory as closed-form expressions of time. This checkout
 adds a second way in, taken from SANDO (Kondo, Tordesillas, How,
 [arXiv:2604.07599](https://arxiv.org/abs/2604.07599)): an obstacle only has to
 be *observed*. Publish `rmader_msgs/ObstacleObservation` (stamp, id, position,
-optional velocity, bounding box) on `/obstacle_observations` and set
-`dyn_obstacles/enabled: true`. With it disabled, which is the default, the
-planner takes none of the new paths.
+optional velocity, bounding box, optional `is_static`) on
+`/obstacle_observations` and set `dyn_obstacles/enabled: true`. With it
+disabled, which is the default, the planner takes none of the new paths.
 
-What the planner does with an observation:
+### What the planner does with an observation
 
 - **Tracks it.** One track per obstacle id: a velocity estimate when the
   observation carries none (position change over `velocity_window`, then
   low-pass filtered, so that observation noise is not amplified by the
   observation rate), a constant-velocity prediction, and a timeout after which
-  an unseen obstacle is forgotten.
+  an unseen obstacle is forgotten. An obstacle reported with `is_static` never
+  grows and is never forgotten.
 - **Bounds where it can be** (`mode: reachable`, the default). This is the
   paper's inflation, Section IV-B: for the piece of trajectory that ends at
   time `t`, the obstacle's box is grown on every side by
@@ -182,20 +183,66 @@ What the planner does with an observation:
   whatever it does. The boxes go through the same convex-hull, A*,
   optimisation and delay-check path as every other obstacle, and R-MADER's
   per-interval hulls play the role of SANDO's time layers.
+- **Chooses where to aim** (`global_path`). Upstream always aims at the point
+  `Ra` along the straight line to the goal, so it cannot go around a large
+  blocked region. Following the paper's Section V, a grid A* now runs from the
+  plan's start to the goal: cells an obstacle occupies *now* are blocked,
+  everything about its future is the soft heat map (`c = d + w_heat * H`).
+  The planner aims at a point along that path.
+- **Only ends a plan where it can afford to stop** (`stop_dwell`). Every plan
+  ends at rest. The subgoal is walked back along the global path until no
+  obstacle can reach it before `stop_dwell` seconds after the plan ends. If no
+  point ahead qualifies, the planner keeps its committed plan and waits rather
+  than creep forward.
+- **Keeps plans short** (`max_horizon`, `max_time_factor`). Box growth is
+  proportional to plan duration. Plans are limited to about `max_horizon`
+  seconds while an obstacle is tracked, and upstream's 2.5 times stretch of
+  plans near the goal is capped at 1.5.
 - **Plans with a little extra room** (`planning_margin`). Every new
   observation moves the boxes slightly. A trajectory planned flush against
   them would be rejected by the delay check that follows, so the hulls used
   for planning are that much larger than the ones used for checking.
-- **Biases the A\* guess** with the paper's dynamic-obstacle heat map
-  (Section V-B, parameters from its Tables II and III): heat around each
-  obstacle's current position plus a time-discounted tube around its
-  predicted path, maximum over obstacles, added to the edge cost as
-  `length + w_heat * H`. NLopt backend only. It shapes the guess and has no
-  part in the safety argument.
 - **Keeps replanning near the goal** while any observed obstacle is tracked.
   Upstream stops once the committed trajectory reaches the goal.
-- **Optionally steps aside** (`hover_avoidance/enabled`) when an obstacle
-  approaches while the agent is stopped at its goal, and returns afterwards.
+- **Optionally steps aside when stopped** (`hover_avoidance/enabled`): at the
+  goal, or wherever it ran out of plan, when an obstacle's predicted path
+  comes within `trigger_dist`. At the goal it returns afterwards.
+- **Optionally escapes when engulfed** (`escape_when_engulfed`). A stopped
+  robot can end up inside an obstacle's inflated box because the obstacle
+  came to it. No plan satisfies the constraints from there. With this on, it
+  plans one move straight away against the obstacles' bodies only. No
+  guarantee applies while that lasts; without it the robot stays put until
+  the obstacle leaves, which is what SANDO does.
+
+The heat map is also added to the cost of R-MADER's own control-point A*
+(NLopt backend only). It shapes paths and has no part in the safety argument.
+
+### Ground mode and the rover bridge
+
+- `integration/rover_sim.launch` takes `dyn_obstacles:=true` (from
+  `RMADER_DYN_OBSTACLES=1` when started through `integration/run_live.sh`)
+  and `obst_max_vel`. Its other settings are the ones the rover-speed tests
+  pass with: `stop_dwell` 4 s, stepping aside within 3 m, escape on.
+- `integration/ros1_bridge.py` accepts obstacle rows from the simulator side
+  and publishes them to both planners:
+
+  ~~~json
+  {"type": "obstacle", "id": 7, "p": [1.0, -2.0], "size": [0.6, 0.6],
+   "v": [0.1, 0.0], "static": false, "age_s": 0.08}
+  ~~~
+
+  `v`, `static` and `age_s` are optional; `p` and `size` may have a third
+  component. The two ends do not share a clock, so the observation is stamped
+  on arrival minus `age_s`. The bridge's heartbeat reports `obstacle_rows`.
+  Nothing on the simulator side sends these rows yet.
+- A stopped rover cannot leave towards a subgoal outside its heading cone.
+  The planner now asks for a turn on the spot: zero velocity and the wanted
+  heading in the setpoint yaw. Whatever tracks the setpoints has to honour
+  that; the test drivers do, the simulator's bridge has not been changed.
+- The control-point A* never worked in ground mode: with `a_star_samp_z: 1`
+  it divided by zero and every candidate became NaN, so the optimiser always
+  started from "stay put". That went unnoticed while nothing was in the way.
+  It is fixed, and the search now prints why it failed when it does.
 
 ### How this relates to the paper
 
@@ -205,104 +252,133 @@ What the planner does with an observation:
 | Speed and error bounds | Per axis (Assumptions 1 and 2) | Per axis |
 | Guarantee | Collision-free against tracked obstacles for the duration of the planned trajectory; no recursive feasibility | The same argument applies to `reachable` mode: each spline segment is separated by a plane from the box that contains the obstacle during that segment's interval. Not proven here beyond the unit test of the box property |
 | When replanning fails | Keep executing the previous trajectory, then hover | Same (R-MADER's committed trajectory ends at rest) |
-| Heat map | Static and dynamic terms on a voxel grid | Dynamic term only, evaluated at B-spline control points. There is no voxel map, so no static term |
-| Global path | Voxel A* in which reachable sets are soft costs only | R-MADER's control-point A*, in which the inflated boxes are also hard constraints |
-| Corridors and optimiser | Convex-decomposition polytopes per layer and path segment, MIQP with variable elimination, parallel time-allocation search | Not ported. R-MADER's separating planes and NLopt are used as they were |
-| Unknown space | Unknown-region boundaries inflated by the same `r_n` | Not ported: R-MADER has no map of unknown space, so an obstacle that has not been observed is not protected against |
+| Global path | Voxel A* over a map; hard where static and dynamic obstacles are now, soft heat for the rest | Same rule on a grid built for each plan from the tracked obstacles only, since there is no map. It picks the subgoal; R-MADER's control-point A* then plans to it with the boxes as hard constraints |
+| Safe subgoal | Walk back along the global path out of the inflated unknown region | Same walk-back, applied to tracked obstacles and extended by `stop_dwell` |
+| Heat map | Static and dynamic terms | Dynamic term only. Its reach uses `max_horizon + stop_dwell` instead of the paper's prediction horizon, so that the path keeps as far away as a subgoal has to |
+| Time allocation | Parallel search over factors from 1.0 to 2.5 | One factor, capped at `max_time_factor` |
+| Corridors and optimiser | Convex-decomposition polytopes per layer and path segment, MIQP with variable elimination | Not ported. R-MADER's separating planes and NLopt are used as they were |
+| Unknown space | Unknown-region boundaries inflated by the same `r_n` | Not ported: there is no map of unknown space, so an obstacle that has not been observed is not protected against |
 | Tracker | Point cloud, temporal occupancy grid, clustering, adaptive EKF | Observations arrive ready-made; windowed finite difference and low-pass filter |
 | `predicted` mode | Named as future work | Extension: box follows the constant-velocity prediction. Tighter, no guarantee |
-| Hover avoidance | In the released configuration, not in the paper | Own implementation |
-| `planning_margin`, replanning at GOAL_SEEN | Not applicable | Added to fit R-MADER's delay check and status machine |
+| Stepping aside, escaping | Hover avoidance is in the released configuration, not in the paper | Own implementation |
+| `planning_margin`, `stop_dwell`, replanning at GOAL_SEEN, turn on the spot | Not applicable | Added to fit R-MADER's delay check, status machine and ground mode |
 
 ### Test
 
-`tests/observed_obstacles_test.py` drives one planner in closed loop, with the
-same bounded tracking model as the two-agent test. The obstacles never publish
-a trajectory; the planner gets 20 Hz position observations with up to 0.03 m
-of noise per axis and no velocity.
+`tests/observed_obstacles_test.py` drives the planners in closed loop. The
+obstacles never publish a trajectory; the planners get 20 Hz position
+observations with up to 0.03 m of noise per axis and no velocity. Aerial
+robots are point masses with the two-agent test's limits; rovers are
+unicycles at 0.55 m/s that turn on the spot when asked.
 
-- `crossing`: the agent shuttles 8 m back and forth while three 0.6 m
-  obstacles wander through its corridor, each heading for a new random
-  waypoint at a new random speed up to 0.5 m/s whenever it arrives.
-- `hover`: the agent is parked at its goal and an obstacle drives straight
-  through that spot at 0.4 m/s.
+- `crossing`: one aerial robot shuttles 8 m while three 0.6 m obstacles wander
+  through its corridor at up to 0.5 m/s, each heading for a new random
+  waypoint at a new random speed whenever it arrives.
+- `crossing2`: two aerial robots swap ends through that corridor.
+- `hover`: an aerial robot is parked at its goal and an obstacle drives
+  straight through that spot at 0.4 m/s.
+- `ground`: one rover shuttles 10 m across a 15 m arena in which two obstacles
+  wander at up to 0.25 m/s.
+- `ground2`: two rovers cross at right angles through that arena.
 
-Each scenario also has a control run with the feature off, which has to
-collide for the scenario to mean anything.
+`tests/bridge_obstacles_test.py` plays the simulator's side of the bridge
+over TCP against the real `integration/rover_sim.launch` and
+`integration/ros1_bridge.py`: two rovers crossing, a static crate on one
+rover's line and a wandering obstacle.
+
+Each scenario has a control run with the feature off, which has to collide
+for the scenario to mean anything.
 
 ~~~bash
 cloud/run_tests.sh          # seed 7 of everything below, plus the unit tests
 ~~~
 
-Results on the 4-CPU cloud container (NLopt backend, 2 m/s agent, 0.35 m
-agent box, 60 s crossing runs). The gap is the smallest distance between the
-agent's box and an obstacle's box; negative means they overlapped.
+Results on the 4-CPU cloud container (NLopt backend). The gap is the smallest
+distance between a robot's box and an obstacle's box; negative means they
+overlapped. Aerial runs last 60 s at 2 m/s among obstacles at up to 0.5 m/s;
+rover runs last 150 s (one rover) or 180 s (two) at 0.55 m/s among obstacles
+at up to 0.25 m/s.
 
-| Run | Obstacle seed | Minimum gap | Time overlapping | Outcome |
-| --- | --- | --- | --- | --- |
-| crossing, `reachable` | 7 | 1.63 m | 0 s | 3 legs |
-| crossing, `reachable` | 11 | 1.33 m | 0 s | 4 legs |
-| crossing, `reachable` | 23 | 1.33 m | 0 s | 5 legs |
-| crossing, `predicted` | 7 | 0.80 m | 0 s | 5 legs |
-| crossing, `predicted` | 11 | 0.64 m | 0 s | 6 legs |
-| crossing, `predicted` | 23 | -0.47 m | 31 s | 2 legs; boxed in while stopped |
-| crossing, feature off | 7 | -0.46 m | 11.4 s | 9 legs, straight through the obstacles |
-| hover, avoidance on | n/a | 1.46 m | 0 s | moved 2.8 m aside, back within 0.01 m of the goal |
-| hover, avoidance off | n/a | -0.48 m | 2.4 s | stayed put and was hit |
+| Run | Seed | Minimum gap | Robot to robot | Legs | Overlap |
+| --- | --- | --- | --- | --- | --- |
+| crossing | 7 | 1.08 m | n/a | 7 | none |
+| crossing | 11 | 1.12 m | n/a | 6 | none |
+| crossing | 23 | 0.92 m | n/a | 7 | none |
+| crossing2 | 7 | 1.06 m | 0.20 m | 5 and 5 | none |
+| crossing2 | 11 | 1.02 m | 0.01 m | 4 and 5 | none |
+| hover | n/a | 1.51 m | n/a | stepped aside, back within 0.01 m | none |
+| ground | 7 | 1.13 m | n/a | 4 | none |
+| ground | 11 | 1.20 m | n/a | 2 | none |
+| ground | 23 | 1.18 m | n/a | 3 | none |
+| ground2 | 7 | 1.18 m | 0.16 m | 2 and 2 | none |
+| ground2 | 11 | 1.14 m | 0.19 m | 3 and 3 | none |
+| bridge | 7 | 0.41 m (crate) | 0.03 m | 2 and 2 | none |
+| crossing, feature off | 7 | -0.46 m | n/a | 9 | 9.3 s |
+| hover, avoidance off | n/a | -0.48 m | n/a | stayed put | 2.4 s |
+| ground, feature off | 7 | -0.50 m | n/a | 3 | 11.0 s |
+| bridge, feature off | 7 | -0.40 m | 0.89 m | 1 and 1 | 8.8 s |
 
-`reachable`, the paper's inflation, was clean in all three runs and slower:
-it keeps the agent out of the corridor until there is room. Three runs are not
-a collision rate.
+Twelve runs with the feature on, no overlap with any obstacle; the four
+controls all collide. That is evidence that the pieces work together in these
+scenarios, not a collision rate. The bridge run delivered 3,364 obstacle rows.
+Robot-to-robot gaps of a few centimetres are R-MADER's own inter-agent
+spacing: it separates the two boxes and nothing more.
 
-`predicted` failed one run in three. With the tighter boxes the agent goes
-into the corridor, and in the failing run it came to the end of its committed
-trajectory there. From then on its own position was inside some obstacle's
-inflated box almost all the time, so the A* search had no feasible start (97
-failures), it sat still for about 40 s, and the wandering obstacles passed
-over it. This is the failure the paper describes for planners whose start can
-fall inside a blocked region, and the reason to treat `predicted` as
-experimental.
+Rover legs are 10 m and take between 25 s and 90 s, against about 25 s with
+nothing in the way: at barely twice the obstacles' speed the rover spends
+much of its time waiting for a subgoal that is safe to stop at.
 
-An earlier build was worse in `predicted` mode: it estimated velocity by
-differencing consecutive observations, so the boxes jittered and the delay
-check rejected 120 of 160 candidates. `velocity_window` and `planning_margin`
-came out of that; rejections then fell to between 18 and 56 per run.
+How it got here, because the intermediate failures are the useful part:
+
+- Before the global path, a rover never finished a leg: it drove up to the
+  obstacles' boxes and sat there, since R-MADER only aims straight ahead.
+- With the global path but no `stop_dwell`, robots were hit while standing
+  still in the middle of the obstacles (once for one rover, repeatedly for
+  two). Stopping is the weak point of this whole family of planners.
+- With `stop_dwell` but the paper's short heat horizon, the path hugged the
+  obstacles, no subgoal ever qualified, and aerial robots mostly waited. The
+  heat's reach now follows from `max_horizon + stop_dwell`.
+- Upstream's 2.5 times stretch of plans near the goal made every box near
+  the goal 2.5 times larger; one aerial run could not commit a single plan.
+- `predicted` mode collided in about one run in three throughout, always
+  with the robot stationary. It is out of the default test run.
 
 The two-agent timing test above misses its 0.5 m separation gate on this
-container with or without these changes: 0.385 m and 0.462 m (one leg
-timeout) for the previous commit, and 0.644 m, 0.435 m, 0.459 m and 0.455 m
-for this branch, all 90 s runs. The 16-CPU laptop results quoted below were
-not reproduced here.
+container with or without any of these changes: 0.385 m and 0.462 m (one leg
+timeout) for the commit before this work, and between 0.435 m and 0.644 m
+since, all 90 s runs. The 16-CPU laptop results quoted below were not
+reproduced here.
 
 ### Limits
 
 - `reachable` holds only against obstacles that are being tracked, whose
   velocity components stay within `obst_max_vel`, and whose observed position
   is within `obst_position_error` per axis, and only up to the end of the
-  committed trajectory, where the agent is at rest. As in the paper there is
-  no recursive feasibility: a stopped agent can still be run into unless hover
-  avoidance moves it. If a track is seen moving faster than the bound, that
-  track's bound is raised to the measured speed.
+  committed trajectory, where the robot is at rest. As in the paper there is
+  no recursive feasibility. `stop_dwell` buys a fixed time after stopping,
+  not a guarantee; after it a stopped robot can still be run into. If a track
+  is seen moving faster than the bound, that track's bound is raised to the
+  measured speed.
+- The whole approach needs the robot to be clearly faster than the
+  obstacles. The rover tests use obstacles at 0.25 m/s against a 0.55 m/s
+  rover and are slow as a result; the paper flies at up to 5 m/s among
+  obstacles at 0.5 m/s.
 - An obstacle that has not been observed yet is not protected against. SANDO
   handles that by inflating the boundary of unknown space, which needs a map
   this planner does not have.
-- `predicted` is not a guarantee, and failed one of three test runs (above).
-- Reachable boxes grow quickly: at 0.5 m/s an obstacle is a 3 m wider box
-  three seconds into the plan. In clutter this can leave no path, and the
-  agent then stops at the end of its committed trajectory.
-- Hover avoidance only acts when the agent is stopped at its goal, not when it
-  is stopped anywhere else.
-- Nothing in this repository produces observations from sensors. The test
-  publishes them from ground truth with noise; a detector or motion-capture
-  relay has to do that on a real system. The rover bridge in `integration/`
-  does not forward obstacles yet.
-- The scenarios above use a single aerial agent. Several agents sharing
-  observed obstacles, ground mode with observed obstacles, and the Gurobi
-  backend were not run. The heat map is compiled out of the Gurobi build,
-  which was not built here.
-- While doing this, an upstream bug surfaced: `dynTraj2dynTrajCompiled` never
-  copied `is_agent`, so the planner read an uninitialised flag. It is now
-  copied and the struct is default-initialised.
+- `predicted` is not a guarantee and has collided in tests.
+- Stepping aside and escaping act only when the robot is already stopped,
+  which is outside what the guarantee covers. Escaping plans against the
+  obstacles' bodies only.
+- Nothing in this repository produces observations from sensors. The tests
+  publish them from ground truth with noise. The bridge accepts obstacle
+  rows, but the simulator side does not send any yet, and it has to honour
+  the turn-on-the-spot request.
+- The Gurobi backend was not built or run here; the heat cost in the
+  control-point A* is compiled out of it.
+- Two upstream bugs surfaced and are fixed: `dynTraj2dynTrajCompiled` never
+  copied `is_agent`, so the planner read an uninitialised flag; and the
+  ground-mode A* division by zero described above.
 
 ## Aerial precursor
 
