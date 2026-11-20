@@ -12,7 +12,7 @@ python3 -m venv /opt/rattler-venv
 /opt/rattler-venv/bin/python cloud/install_ros_env.py /opt/ros-noetic-env   # ~1 min, 5 GB
 git submodule update --init submodules/catkin_simple submodules/separator submodules/snapstack_msgs
 cloud/build.sh                                                              # ~4 min on 4 cores
-cloud/run_tests.sh                                                          # ~25 min
+cloud/run_tests.sh                                                          # ~40 min
 ~~~
 
 | File | Purpose |

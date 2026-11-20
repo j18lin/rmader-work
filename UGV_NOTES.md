@@ -262,11 +262,11 @@ The heat map is also added to the cost of R-MADER's own control-point A*
 | When replanning fails | Keep executing the previous trajectory, then hover | Same (R-MADER's committed trajectory ends at rest) |
 | Global path | Voxel A* over a map; hard where static and dynamic obstacles are now, soft heat for the rest | Same rule on a grid built for each plan from the tracked obstacles only, since there is no map. It picks the subgoal; R-MADER's control-point A* then plans to it with the boxes as hard constraints |
 | Safe subgoal | Walk back along the global path out of the inflated unknown region | Same walk-back, applied to tracked obstacles and extended by `stop_dwell` |
-| Heat map | Static and dynamic terms | Dynamic term only. Its reach uses `max_horizon + stop_dwell` instead of the paper's prediction horizon, so that the path keeps as far away as a subgoal has to |
-| Time allocation | Parallel search over factors from 1.0 to 2.5 | One factor, capped at `max_time_factor` |
-| Corridors and optimiser | Convex-decomposition polytopes per layer and path segment, MIQP with variable elimination | Not ported. R-MADER's separating planes and NLopt are used as they were |
-| Unknown space | Unknown-region boundaries inflated by the same `r_n` | Not ported: there is no map of unknown space, so an obstacle that has not been observed is not protected against |
-| Tracker | Point cloud, temporal occupancy grid, clustering, adaptive EKF | Observations arrive ready-made; windowed finite difference and low-pass filter |
+| Heat map | Static and dynamic terms | Dynamic term; the static term too when there is a map. Its reach uses `max_horizon + stop_dwell` instead of the paper's prediction horizon, so that the path keeps as far away as a subgoal has to |
+| Time allocation | Parallel search over factors from 1.0 to 2.5 | B-spline backend: one factor, capped at `max_time_factor`. Corridor backend: SANDO's window of factors, tried in order (see "SANDO's optimiser, map and tracker") |
+| Corridors and optimiser | Convex-decomposition polytopes per layer and path segment, MIQP with variable elimination | Ported as a second backend, `corridor/enabled`, without Gurobi. The default backend is still R-MADER's separating planes and NLopt |
+| Unknown space | Unknown-region boundaries inflated by the same `r_n` | Ported with a map built from range scans, `map/enabled`, for the corridor backend only |
+| Tracker | Point cloud, temporal occupancy grid, clustering, adaptive EKF | Observations arrive ready-made; windowed finite difference and low-pass filter. Clustering and the adaptive filter are ported as an option, `tracker/enabled`, that turns scans into such observations |
 | Tighter sets from prediction | Named as future work | `accel_bounded`: bounded acceleration from the estimated velocity, clipped to the reachable box. `predicted`: box follows the constant-velocity prediction, no guarantee |
 | Stepping aside, escaping | Hover avoidance is in the released configuration, not in the paper | Own implementation |
 | `planning_margin`, `stop_dwell`, replanning at GOAL_SEEN, turn on the spot | Not applicable | Added to fit R-MADER's delay check, status machine and ground mode |
@@ -402,15 +402,15 @@ reproduced here.
   obstacles. The rover tests use obstacles at 0.25 m/s against a 0.55 m/s
   rover and are slow as a result; the paper flies at up to 5 m/s among
   obstacles at 0.5 m/s.
-- An obstacle that has not been observed yet is not protected against. SANDO
-  handles that by inflating the boundary of unknown space, which needs a map
-  this planner does not have.
+- An obstacle that has not been observed yet is not protected against,
+  unless the corridor backend is used with a map (next but one section).
 - `predicted` is not a guarantee and has collided in tests.
 - Stepping aside and escaping act only when the robot is already stopped,
   which is outside what the guarantee covers. Escaping plans against the
   obstacles' bodies only.
-- Nothing in this repository produces observations from sensors. The tests
-  publish them from ground truth with noise. The bridge accepts obstacle
+- By default nothing produces observations from sensors: the tests publish
+  them from ground truth with noise. The optional tracker (`tracker/enabled`)
+  finds moving obstacles in range scans and has been tried in one scenario. The bridge accepts obstacle
   rows, but the simulator side does not send any yet, and it has to honour
   the turn-on-the-spot request.
 - The Gurobi backend was not built or run here; the heat cost in the
@@ -484,8 +484,219 @@ before and after the fault are plain R-MADER with a 0.35 m planner box, as
 described above.
 
 Not run: more than two robots, ground mode, and a silent teammate together
-with observed obstacles.
+with observed obstacles. The test does not pass every time: see the end of
+"Test" in the next section.
 
+
+## SANDO's optimiser, map and tracker
+
+The section on observed obstacles puts SANDO's obstacle model in front of
+R-MADER's own search and B-spline optimiser. This section is the rest of
+SANDO, ported from its source (`j18lin/sando`, BSD 3-Clause, copyright Kota
+Kondo) as three options that are all off by default:
+
+| Option | What it is | Needs |
+| --- | --- | --- |
+| `corridor/enabled` | SANDO's local planner as the backend: time-layered corridors and a trajectory optimised inside them | |
+| `map/enabled` | A map of free, occupied and unknown space built from range scans; static heat; unknown-space inflation | `corridor/enabled` |
+| `tracker/enabled` | Clustering and an adaptive Kalman filter that turn the same scans into obstacle observations | `map/enabled`, `dyn_obstacles/enabled` |
+
+What stays R-MADER's in every case: the check after optimisation, the delay
+check, the two-step publication, and the trajectory teammates receive (a
+piecewise polynomial, as before). Planners on either backend can share an
+arena, because what they exchange did not change. That mix was not run.
+
+### The corridor backend
+
+One replanning step, with the SANDO source it follows:
+
+1. **Global path** (`graph_search.cpp`). The grid A* of the previous section,
+   now also blocked where the map is occupied (grown by the robot's size) and
+   where a teammate is at the start of the plan, and heated near obstacle
+   surfaces (the paper's static heat) and along what each teammate has
+   committed to. Unknown space is free here, as in SANDO. The grid path is
+   straightened where that crosses nothing blocked and nothing hotter. The
+   teammate terms are not from SANDO, which plans for one robot.
+2. **Time allocation** (`getInitialDt`, the factor window in `sando.cpp`).
+   `dt = factor * dt0`, with SANDO's `dt0` and SANDO's window of factors that
+   follows the last one that worked. SANDO solves the window's factors in
+   parallel threads and takes whichever finishes first; here they are tried
+   in ascending order, so the shortest plan that works is the one used.
+3. **End point** (`findSafeSubGoal`). For each factor, the furthest point of
+   the path where the robot can stop and stay clear of every teammate and
+   obstacle for `stop_dwell`, and that is outside occupied space and outside
+   the unknown region grown by `v * T`. If the corridors to that point leave
+   no trajectory, nearer end points are tried (0.6 and 0.36 of the path): a
+   shorter plan gives everything less time to spread.
+4. **Corridors** (`cvxEllipsoidDecompTimeLayered`). For each of the N pieces'
+   time intervals and each of the P path segments, one polytope from
+   DecompUtil's ellipsoid decomposition; 2D polygons extruded over a height
+   band for ground robots, as in the fork's "2D changes". What the polytopes
+   keep out, in layer `n`:
+   - the convex hull R-MADER builds for interval `n` of every teammate's
+     committed trajectory, every broadcast obstacle, every observed
+     obstacle's reachable box and every silent teammate's box, as points
+     sampled on the hull's surface;
+   - occupied voxels, and the unknown region grown by
+     `r_n = v_unknown * (time to the end of layer n)`.
+   A polytope whose own path segment is inside one of those is dropped, and
+   that layer cannot use that segment. SANDO fails the whole decomposition
+   instead.
+5. **Optimisation** (`gurobi_solver.cpp`). Same problem: N cubic pieces,
+   position, velocity and acceleration continuous, start state given, end at
+   rest, every piece inside one polytope of its layer, per-axis bounds on the
+   velocity, acceleration and jerk control points, minimum squared jerk.
+   Solved without Gurobi: the equalities are eliminated numerically, which
+   leaves the paper's N - 3 free variables per axis, and the choice of
+   polytopes is a branch and bound over small QPs solved by a dual active-set
+   solver written for this (`dense_qp.cpp`). By default only choices that
+   follow the path's order are tried; `corridor/exhaustive` tries all P^N,
+   which is the optimum of SANDO's mixed-integer problem (checked against
+   brute force in the unit test, where both settings gave the same optimum).
+   For rovers the first piece also has to leave within the heading cone, and
+   a result that turns faster than the rover can is rejected.
+6. **Exact check.** The polytopes are built from sampled points, so before a
+   trajectory is accepted every piece is checked against every hull of its
+   interval with the separating-plane LP R-MADER uses everywhere else. This
+   is what carries R-MADER's guarantee over to this backend. Against the map
+   the check is weaker: the robot's box is tested against occupied voxels at
+   points sampled along the trajectory. Unknown space is kept out by the
+   polytopes alone, as in SANDO.
+
+### The map
+
+`voxel_map.cpp`. SANDO receives occupied and unknown voxels from a separate
+mapper; here the planner builds the map itself from range scans
+(`sensor_msgs/PointCloud2` on `~point_cloud`, world frame, taken from the
+robot's position; a ray as long as `map/sensor_range` or longer found
+nothing). A voxel is unknown until a ray has reached it. A ray that ends in a
+voxel adds evidence and rays passing through take it away, so one stray
+return does not build a wall and something that has left is forgotten after a
+few scans. Whatever is tracked as a moving obstacle is kept out of the map.
+Ground robots get one layer of voxels.
+
+The map is used the way the paper says: occupied voxels block the global path
+and unknown ones do not; the static heat is the paper's formula; in the
+corridors unknown space counts as occupied and is grown, layer by layer, with
+the paper's L-infinity ball. The speed of what may come out of unknown space
+is `map/unknown_max_vel`, by default the obstacles' speed bound.
+
+### The tracker
+
+`cloud_tracker.cpp`, a port of `obstacle_tracker_node.cpp` without PCL: voxel
+grid, Euclidean clustering, bounding boxes, nearest-track association, and
+the adaptive Kalman filter with the same update of its noise covariances.
+Two differences: the prediction step uses the time that really passed (SANDO
+uses a fixed step), and only tracks that move faster than
+`tracker/velocity_threshold` are passed on, as observations with a velocity,
+to everything described under "Observed dynamic obstacles". What stands
+still is left to the map.
+
+### Test
+
+Unit tests, all passing: `test_corridor_planner` (the QP solver on 2,000
+random problems against the optimality conditions and an independent
+feasibility test; the optimiser in free space, round a corner, with a passage
+that closes over time, with the heading cone; corridor generation;
+around a growing obstacle end to end), `test_voxel_map`, `test_cloud_tracker`.
+One optimisation takes about 0.1 ms; a whole planning step took 2 to 30 ms.
+
+Closed loop, corridor backend against the B-spline backend on the scenarios
+of "Observed dynamic obstacles" (60 s aerial, 150 and 180 s ground):
+
+| Scenario | B-spline backend | Corridor backend |
+| --- | --- | --- |
+| One aerial robot, three obstacles | 1.12 m to the nearest obstacle, 6 legs | 0.62 to 0.75 m, 2 to 3 legs (three runs) |
+| Two aerial robots (planner box 0.6 m) | 0.85 m, robots 0.41 m apart, 5 legs each | 0.70 m, robots 0.46 m apart, 1 leg each |
+| One rover, two obstacles | 1.38 m, 4 legs | 1.53 m, 1 leg |
+| Two rovers | 1.25 m, rovers 0.12 m apart, 3 legs each | Two runs: 1.13 m with the rovers' boxes overlapping by 3.4 cm, 2 legs each; 0.87 m with the rovers 0.17 m apart, 2 legs each |
+
+No robot touched an obstacle on either backend. The overlap of the two rovers
+is between boxes the planner keeps exactly apart, with no allowance for how
+well the rovers follow their setpoints (the planner's box is the vehicle's
+box in the ground tests; the aerial two-robot test has such an allowance for
+the same reason). With a 0.8 m planner box the two rovers stayed 0.25 m apart
+but completed no leg in 180 s.
+
+With a map, one rover (0.55 m/s) with a simulated planar range sensor
+(4 m, 360 rays, 10 Hz), `tests/map_test.py`:
+
+| Run | Result |
+| --- | --- |
+| Crates, unknown space grown at 0.1 m/s | 5 legs in 150 s, never closer than 0.53 m to a crate |
+| Crates, unknown space not grown (`inflate_unknown:=false`) | 2 legs, 0.39 m |
+| Crates, unknown space grown at 0.25 m/s | Stopped 0.8 m short of the first crate and stayed there |
+| Crates, no map | Drove 0.65 m into a crate |
+| Ambush, unknown space grown at 0.25 m/s, the hidden obstacle's speed | 5 legs, never closer than 0.95 m to the obstacle (two runs, the same to a millimetre) |
+| Ambush, grown at 0.1 m/s | Hit by the obstacle while standing, boxes 0.25 m into each other |
+| Ambush, not grown | Hit while standing, 0.45 m |
+| Ambush, obstacle never reported, tracker on, grown at 0.25 m/s | 2 legs, 0.07 m |
+
+The rover launch file and bridge (`integration/rover_sim.launch` with
+`corridor:=true dyn_obstacles:=true`, this side playing the simulator) also
+ran once on the corridor backend: 0.40 m to the crate that crosses, rovers
+3.1 m apart, one leg each in 180 s (the B-spline backend did two).
+
+In the ambush the rover drives along a wall and an obstacle comes round the
+wall's far end across its way; the obstacle is reported to the planner only
+while the rover has a line of sight to it. In the last row it is not reported
+at all and the planner's own tracker has to find it in the scans.
+
+What these show:
+
+- The corridor backend kept every robot clear of every obstacle and teammate
+  in every run, including while it was being debugged. It is slower than the
+  B-spline backend in the air: with N = 5 there are two free variables per
+  axis, the bounds are on control points, and the factor that works is
+  usually near 2.
+- The map does what it is for: without it the rover drives into a crate.
+- Unknown-space inflation is the difference between passing and being hit in
+  the ambush, but only when it assumes the speed the hidden obstacle really
+  has. Without it, or with a lower speed, the rover commits to a plan that
+  ends in the obstacle's way before it can see it, stops there, and is hit
+  while standing.
+- The same inflation at 0.25 m/s stops this rover in front of the first
+  crate, for good: the unseen inside of a crate is unknown space too, and
+  0.25 m/s for the several seconds a slow rover's plan lasts is more than a
+  metre in every direction. SANDO has the same property and escapes it with
+  short plans on a fast vehicle. Among the crates the test therefore grows
+  unknown space at 0.1 m/s.
+
+The whole suite (`cloud/run_tests.sh`, now 26 checks) was run once on this
+build: 23 passed. The three that did not: two rovers on the corridor backend
+(the 3.4 cm overlap above; it passed when rerun), upstream's `two_agent`
+(as before), and `peer_silence`, described next.
+
+`peer_silence` is the link-drop test of the previous section, on the default
+backend with none of these options on. It turned out to fail in some runs:
+after the link returns the two planners can keep rejecting each other's
+trajectories in the delay check and never set off again, or pass each other
+with their boxes touching by up to 4 cm. Run alternately, the previous commit
+failed 1 of 4 and this build 2 of 4, the previous commit's failure having the
+same log as this build's. Over everything run that day it was 1 of 7 against
+8 of 13. No code path that differs with these options off was found, and the
+difference is not explained. The results table of the previous section is
+from runs that passed.
+
+### Limits
+
+- Everything in the list under "Observed dynamic obstacles" still applies.
+- One run per configuration, apart from the aerial crossings.
+- The map and the tracker were run closed-loop for a ground robot only. The
+  3D map has unit tests and nothing else.
+- The tracker passed its one closed-loop run with 7 cm to spare. It sees only
+  the near faces of an obstacle, so its boxes are too small and off-centre;
+  `tracker/bbox_padding` is a fixed allowance for that, not a bound. In the
+  unit test the adaptive filter followed a turn worse than the plain one.
+  The fork's tracker node clusters every return and so does this; neither
+  separates moving from static points before clustering.
+- The scans are taken to come from the robot's position in the world frame.
+  There is no frame handling, and the rover bridge does not carry scans.
+- With `map/enabled` the B-spline backend is refused, because it has no way
+  to use the map.
+- Not ported: solving the time factors in parallel, and Gurobi itself.
+- The polytope choice is ordered by default. The unit test found the same
+  optimum either way, on one problem.
 
 ## Aerial precursor
 

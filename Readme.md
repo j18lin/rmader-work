@@ -134,3 +134,8 @@ This checkout can also avoid obstacles that are only observed, with no trajector
 (after SANDO, arXiv:2604.07599; off by default). See "Observed dynamic obstacles" in [UGV_NOTES.md](UGV_NOTES.md)
 and [cloud/README.md](cloud/README.md)
 for building and testing without Docker.
+
+The rest of SANDO is here too, as options that are off by default: its corridor optimiser as a second planning
+backend (`corridor/enabled`, no Gurobi needed), a map of free, occupied and unknown space built from range scans
+(`map/enabled`), and its obstacle tracker (`tracker/enabled`). See "SANDO's optimiser, map and tracker" in
+[UGV_NOTES.md](UGV_NOTES.md). The ported code is under SANDO's licence, [rmader/LICENSE.SANDO](rmader/LICENSE.SANDO).
