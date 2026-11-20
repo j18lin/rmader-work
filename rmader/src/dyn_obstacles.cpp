@@ -351,8 +351,22 @@ struct QueueEntry
 };
 }  // namespace
 
+double knownPathHeat(const Eigen::Vector3d& q, const std::vector<std::pair<double, Eigen::Vector3d>>& path,
+                     double radius, const Params& par)
+{
+  const double horizon = (par.heat_horizon > 0.0) ? par.heat_horizon : par.prediction_horizon;
+  const double tau = par.heat_tau_ratio * horizon;
+  double tube = 0.0;
+  for (const auto& sample : path)
+  {
+    const double weight = (tau > 0.0) ? std::exp(-sample.first / tau) : (sample.first > 0.0 ? 0.0 : 1.0);
+    tube = std::max(tube, weight * falloff((q - sample.second).norm(), radius, par.heat_power_tube));
+  }
+  return std::min(par.heat_alpha_tube * tube, par.heat_max);
+}
+
 bool planGlobalPath(const GlobalPathRequest& request, const std::vector<Track>& tracks, const Params& par,
-                    std::vector<Eigen::Vector3d>& path)
+                    std::vector<Eigen::Vector3d>& path, const GlobalPathExtras* extras)
 {
   path.clear();
   const double res = par.global_resolution;
@@ -401,7 +415,15 @@ bool planGlobalPath(const GlobalPathRequest& request, const std::vector<Track>& 
         return true;
       }
     }
-    return false;
+    return extras != nullptr && extras->blocked && extras->blocked(p);
+  };
+  auto total_heat = [&](const Eigen::Vector3d& p) {
+    const double dynamic = heat(p, tracks, par);
+    if (extras == nullptr || !extras->heat)
+    {
+      return dynamic;
+    }
+    return std::min(std::max(dynamic, extras->heat(p)), par.heat_max);
   };
 
   std::unordered_map<Cell, CellInfo, CellHash> cells;
@@ -467,7 +489,7 @@ bool planGlobalPath(const GlobalPathRequest& request, const std::vector<Track>& 
             // The goal cell stays reachable even if an obstacle currently sits on it; the planner's hard
             // constraints decide how close the trajectory can actually get.
             info.blocked = !(next == goal) && blocked(next_center);
-            info.heat = info.blocked ? 0.0 : heat(next_center, tracks, par);
+            info.heat = info.blocked ? 0.0 : total_heat(next_center);
           }
           if (info.blocked && !escaping)
           {

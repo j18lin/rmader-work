@@ -9,6 +9,8 @@
        0.35 m box. R-MADER separates two teammates' boxes exactly, so with 0.35 here two robots passing
        head-on end up a few centimetres either side of touching once tracking error is added. -->
   <arg name="planner_bbox" default="0.35"/>
+  <!-- The same for a rover: the tests score with its 0.7 m box. -->
+  <arg name="rover_bbox" default="0.7"/>
   <arg name="dyn_mode" default="reachable"/>
   <arg name="obst_max_vel" default="0.5"/>
   <arg name="obst_max_acc" default="1.0"/>
@@ -20,6 +22,16 @@
   <arg name="evade_trigger" default="1.5"/>
   <arg name="escape" default="false"/>
   <arg name="stop_dwell" default="1.5"/>
+  <!-- true: SANDO's corridor optimiser instead of R-MADER's search and B-spline optimisation -->
+  <arg name="corridor" default="false"/>
+  <!-- Map from range scans on /$(arg ns)/point_cloud (needs corridor:=true) -->
+  <arg name="map" default="false"/>
+  <arg name="inflate_unknown" default="true"/>
+  <arg name="sensor_range" default="4.0"/>
+  <arg name="unknown_max_vel" default="-1.0"/>
+  <!-- Find moving obstacles in the scans themselves (needs map:=true) -->
+  <arg name="tracker" default="false"/>
+  <arg name="local_horizon" default="0.0"/>
 
   <group ns="$(arg ns)">
     <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
@@ -46,7 +58,7 @@
       <rosparam if="$(arg ground)" param="tuning_param/v_max">[0.55, 0.55, 0.01]</rosparam>
       <rosparam if="$(arg ground)" param="tuning_param/a_max">[0.5, 0.5, 0.01]</rosparam>
       <rosparam if="$(arg ground)" param="tuning_param/j_max">[1.0, 1.0, 0.02]</rosparam>
-      <rosparam if="$(arg ground)" param="tuning_param/drone_bbox">[0.7, 0.7, 0.4]</rosparam>
+      <rosparam if="$(arg ground)" param="tuning_param/drone_bbox" subst_value="true">[$(arg rover_bbox), $(arg rover_bbox), 0.4]</rosparam>
       <param if="$(arg ground)" name="tuning_param/Ra" value="8.0"/>
       <param if="$(arg ground)" name="opt/a_star_samp_z" value="1"/>
       <param if="$(arg ground)" name="setting/goal_radius" value="0.4"/>
@@ -65,8 +77,16 @@
       <param name="dyn_obstacles/stop_dwell" value="$(arg stop_dwell)"/>
       <param name="dyn_obstacles/hover_avoidance/trigger_dist" value="$(arg evade_trigger)"/>
       <param name="dyn_obstacles/hover_avoidance/evasion_dist" value="2.5"/>
+      <param name="corridor/enabled" value="$(arg corridor)"/>
+      <param name="map/enabled" value="$(arg map)"/>
+      <param name="map/inflate_unknown" value="$(arg inflate_unknown)"/>
+      <param name="map/sensor_range" value="$(arg sensor_range)"/>
+      <param name="map/unknown_max_vel" value="$(arg unknown_max_vel)"/>
+      <param name="tracker/enabled" value="$(arg tracker)"/>
+      <param name="corridor/local_horizon" value="$(arg local_horizon)"/>
 
       <remap from="~state" to="/$(arg ns)/state"/>
+      <remap from="~point_cloud" to="/$(arg ns)/point_cloud"/>
       <remap from="~term_goal" to="/$(arg ns)/term_goal"/>
       <remap from="~goal" to="/$(arg ns)/goal"/>
     </node>

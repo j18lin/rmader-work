@@ -4,6 +4,8 @@
        the rover-speed tests in tests/observed_obstacles_test.py pass with. -->
   <arg name="dyn_obstacles" default="false"/>
   <arg name="obst_max_vel" default="0.25"/>
+  <!-- true: SANDO's corridor optimiser instead of R-MADER's search and B-spline optimisation (UGV_NOTES.md) -->
+  <arg name="corridor" default="false"/>
   <group ns="SQ81s">
     <node pkg="rmader" type="rmader_node" name="rmader" output="screen">
       <rosparam file="$(find rmader)/param/rmader.yaml" command="load"/>
@@ -31,6 +33,7 @@
       <param name="dyn_obstacles/hover_avoidance/trigger_dist" value="3.0"/>
       <param name="dyn_obstacles/hover_avoidance/evasion_dist" value="2.5"/>
       <param name="dyn_obstacles/escape_when_engulfed" value="true"/>
+      <param name="corridor/enabled" value="$(arg corridor)"/>
       <remap from="~state" to="/SQ81s/state"/>
       <remap from="~term_goal" to="/SQ81s/term_goal"/>
       <remap from="~goal" to="/SQ81s/goal"/>
@@ -63,6 +66,7 @@
       <param name="dyn_obstacles/hover_avoidance/trigger_dist" value="3.0"/>
       <param name="dyn_obstacles/hover_avoidance/evasion_dist" value="2.5"/>
       <param name="dyn_obstacles/escape_when_engulfed" value="true"/>
+      <param name="corridor/enabled" value="$(arg corridor)"/>
       <remap from="~state" to="/SQ83s/state"/>
       <remap from="~term_goal" to="/SQ83s/term_goal"/>
       <remap from="~goal" to="/SQ83s/goal"/>

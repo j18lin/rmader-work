@@ -27,6 +27,7 @@
 
 #include <Eigen/Dense>
 #include <deque>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -242,13 +243,27 @@ struct GlobalPathRequest
   bool planar = false;                                        // true: search in the horizontal plane only
 };
 
+// What the global search needs to know beyond the observed obstacles: a static map, teammates. Both
+// members may be left empty.
+struct GlobalPathExtras
+{
+  std::function<bool(const Eigen::Vector3d&)> blocked;  // true where the agent's centre cannot be
+  std::function<double(const Eigen::Vector3d&)> heat;   // combined with the dynamic heat by max, as in the paper
+};
+
+// Heat of a body whose future path is known, e.g. a teammate's committed trajectory: the tube term of the
+// paper with the known path in place of the prediction and a tube that does not grow. `path` holds
+// (time from now, position). This term is not in the paper, which considers a single agent.
+double knownPathHeat(const Eigen::Vector3d& q, const std::vector<std::pair<double, Eigen::Vector3d>>& path,
+                     double radius, const Params& par);
+
 // Grid A* with the paper's edge cost c = d + heat_weight * H(q). A cell is blocked if the agent's box centred
 // on it would overlap an obstacle's current box (grown by base_inflation and obst_position_error). The goal
 // is clamped into the search window. If the start itself is blocked, the path may cross blocked cells until
 // it first reaches a free one. Returns false if no path was found; `path` then is empty.
 // On success `path` starts at request.start and ends at the cell nearest the (clamped) goal.
 bool planGlobalPath(const GlobalPathRequest& request, const std::vector<Track>& tracks, const Params& par,
-                    std::vector<Eigen::Vector3d>& path);
+                    std::vector<Eigen::Vector3d>& path, const GlobalPathExtras* extras = nullptr);
 
 // The point `arc_length` along a polyline from its first point (its last point if the polyline is shorter).
 Eigen::Vector3d pointAlongPath(const std::vector<Eigen::Vector3d>& path, double arc_length);

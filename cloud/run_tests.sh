@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run every check that works without Docker, Gazebo or a Gurobi license:
-# the unit tests, then the closed-loop ROS tests (about 25 minutes).
+# the unit tests, then the closed-loop ROS tests (about 40 minutes).
 # RUN_EXPERIMENTAL=1 adds the predicted-mode run.
 #
 #   cloud/run_tests.sh [results dir]      # default: test-results/cloud
@@ -32,6 +32,9 @@ closed_loop() {
 }
 
 run unit_dyn_obstacles rosrun rmader test_dyn_obstacles
+run unit_corridor_planner rosrun rmader test_corridor_planner
+run unit_voxel_map rosrun rmader test_voxel_map
+run unit_cloud_tracker rosrun rmader test_cloud_tracker
 run unit_python python3 -m pytest -q tests
 
 obs=tests/observed_obstacles.launch
@@ -63,7 +66,27 @@ closed_loop bridge_control integration/rover_sim.launch "" tests/bridge_obstacle
 closed_loop peer_silence tests/peer_silence.launch "peer_silence:=true" tests/peer_silence_test.py
 closed_loop peer_silence_control tests/peer_silence.launch "peer_silence:=false" tests/peer_silence_test.py --control
 
+# SANDO's corridor optimiser as backend (corridor:=true), on the same scenarios.
+closed_loop corridor_crossing "$obs" "escape:=true corridor:=true" "$drv" --scenario crossing --duration 60 --min-legs 1
+closed_loop corridor_two_robots "$obs" "agents:=2 escape:=true planner_bbox:=0.6 corridor:=true" "$drv" \
+  --scenario crossing2 --duration 60 --min-legs 1
+closed_loop corridor_ground_rover "$obs" "$rover corridor:=true" "$drv" --scenario ground --duration 150 --min-legs 1
+closed_loop corridor_ground_two_rovers "$obs" "$rover agents:=2 corridor:=true" "$drv" --scenario ground2 \
+  --duration 180 --min-legs 1
+
+# The same backend with a map built from range scans: crates nobody announces, and an obstacle that comes out
+# from behind a wall. The unknown region is grown at 0.1 m/s among the crates (at the obstacles' 0.25 m/s the
+# rover does not get past a crate: see UGV_NOTES.md) and at 0.25 m/s in the ambush.
+map=tests/map.launch
+closed_loop map_crates "$map" "unknown_max_vel:=0.1" tests/map_test.py --scenario crates --duration 150
+closed_loop map_crates_control "$map" "map:=false" tests/map_test.py --scenario crates --duration 90 --expect-collision
+closed_loop map_ambush "$map" "unknown_max_vel:=0.25" tests/map_test.py --scenario ambush --duration 150
+
 if test "${RUN_EXPERIMENTAL:-0}" = 1; then
+  # The moving obstacle is never reported: the planner's own tracker has to find it in the scans. Passed
+  # with 7 cm to spare when tried.
+  closed_loop map_ambush_tracker "$map" "unknown_max_vel:=0.25 tracker:=true" tests/map_test.py --scenario ambush \
+    --duration 150 --no-observations
   # predicted mode gives no guarantee and has collided in about one run in three
   closed_loop crossing_predicted "$obs" "dyn_mode:=predicted escape:=true" "$drv" --scenario crossing --duration 60
 fi

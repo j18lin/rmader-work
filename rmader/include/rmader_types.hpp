@@ -592,6 +592,63 @@ struct peerSilence
   bool fault_injection = false;   // tests only: obey ~sim_comm_fault (1 = deaf, 2 = mute, 3 = both)
 };
 
+// SANDO's local optimiser as the backend of the planner (corridor/* in rmader.yaml): instead of R-MADER's
+// search and B-spline optimisation, a trajectory of N cubic pieces is optimised inside polytopes built
+// around a global path for every piece's time interval. See corridor_planner.hpp and stsfc.hpp.
+struct corridorParams
+{
+  bool enabled = false;
+  int num_pieces = 5;     // N, pieces of the trajectory = time layers
+  int num_polytopes = 3;  // P, segments of the global path that get a polytope
+  // Time allocation, dt = factor * dt0: a window of factors around the last one that worked.
+  double factor_initial = 1.0;
+  double factor_final = 3.0;
+  double factor_step = 0.1;
+  double factor_initial_mean = 1.5;
+  double factor_radius = 0.4;
+  bool exhaustive = false;  // true: all P^N choices of polytopes; false: those that follow the path's order
+  Eigen::Vector3d local_bbox = Eigen::Vector3d(2.0, 2.0, 1.0);  // [m] reach of a polytope around its segment
+  double sample_spacing = 0.15;      // [m] spacing of the points that stand for an obstacle's hull
+  double min_segment_length = 0.2;   // [m] path segments are not split below this
+  double local_horizon = 0.0;        // [m] longest path one plan covers; <= 0: the planning radius Ra
+  double planar_half_height = 0.5;   // [m] ground robots: half height of the band the 2D polytopes span
+};
+
+// Map of free, occupied and unknown space built from range scans (map/* in rmader.yaml), used by the
+// corridor backend the way SANDO uses its map: see voxel_map.hpp.
+struct mapParams
+{
+  bool enabled = false;
+  double resolution = 0.15;       // [m]
+  double sensor_range = 6.0;      // [m]
+  bool inflate_unknown = true;    // grow the unknown region by what an unseen obstacle could cover
+  double unknown_max_vel = -1.0;  // [m/s] speed of that unseen obstacle; negative: dyn_obstacles/obst_max_vel
+  double heat_alpha = 5.0;        // static heat, paper Table II
+  double heat_power = 2.0;
+  double heat_radius = -1.0;      // [m] negative: three robot radii, as in the paper
+  int hit = 3;
+  int miss = 1;
+};
+
+// Moving obstacles found in the range scans themselves (tracker/* in rmader.yaml), for robots that get no
+// obstacle observations from elsewhere. See cloud_tracker.hpp.
+struct trackerParams
+{
+  bool enabled = false;
+  double leaf_size = 0.1;
+  double cluster_tolerance = 0.4;
+  int min_cluster_size = 3;
+  double bbox_cutoff = 2.0;
+  double association_distance = 1.0;
+  bool adaptive = true;
+  double alpha = 0.9;
+  double time_to_delete = 5.0;
+  double velocity_threshold = 0.15;  // [m/s] slower tracks are left to the static map
+  int min_updates = 5;               // a track is reported once it has been seen this often
+  double bbox_padding = 0.2;         // [m] added to each side of a cluster's box (only its near faces are seen)
+  double default_height = 0.6;       // [m] height given to obstacles seen by a planar scan
+};
+
 struct parameters
 {
   // Ground robot mode constrains the optimized path to forward motion and
@@ -683,6 +740,9 @@ struct parameters
 
   dynobs::Params dyn;  // observation-based dynamic obstacles (dyn_obstacles/* in rmader.yaml)
   peerSilence peer_silence;  // peer_silence/* in rmader.yaml
+  corridorParams corridor;   // corridor/* in rmader.yaml
+  mapParams map;             // map/* in rmader.yaml
+  trackerParams tracker;     // tracker/* in rmader.yaml
 };
 
 typedef std::vector<mt::state> trajectory;

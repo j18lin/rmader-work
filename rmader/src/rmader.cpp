@@ -115,6 +115,39 @@ Rmader::Rmader(mt::parameters par) : par_(par)
 
   separator_solver_ = new separator::Separator();
 
+  if (par_.map.enabled)
+  {
+    vmap::Params map_par;
+    map_par.resolution = par_.map.resolution;
+    map_par.lower << par_.x_min, par_.y_min, par_.z_min;
+    map_par.upper << par_.x_max, par_.y_max, par_.z_max;
+    map_par.planar = par_.ground_robot;
+    map_par.sensor_range = par_.map.sensor_range;
+    map_par.hit = par_.map.hit;
+    map_par.miss = par_.map.miss;
+    map_par.heat_alpha = par_.map.heat_alpha;
+    map_par.heat_power = par_.map.heat_power;
+    map_par.heat_radius = par_.map.heat_radius > 0.0 ? par_.map.heat_radius : 3.0 * mapHalfSize().norm();
+    map_par.heat_max = par_.dyn.heat_max;
+    map_ = std::unique_ptr<vmap::VoxelMap>(new vmap::VoxelMap(map_par));
+  }
+  if (par_.tracker.enabled)
+  {
+    ctrack::Params tracker_par;
+    tracker_par.leaf_size = par_.tracker.leaf_size;
+    tracker_par.cluster_tolerance = par_.tracker.cluster_tolerance;
+    tracker_par.min_cluster_size = par_.tracker.min_cluster_size;
+    tracker_par.bbox_cutoff = par_.tracker.bbox_cutoff;
+    tracker_par.association_distance = par_.tracker.association_distance;
+    tracker_par.adaptive = par_.tracker.adaptive;
+    tracker_par.alpha = par_.tracker.alpha;
+    tracker_par.time_to_delete = par_.tracker.time_to_delete;
+    tracker_par.planar = par_.ground_robot;
+    cloud_tracker_ = std::unique_ptr<ctrack::CloudTracker>(new ctrack::CloudTracker(tracker_par));
+  }
+  corridor_factors_ = corridor::FactorWindow(par_.corridor.factor_initial_mean, par_.corridor.factor_radius,
+                                            par_.corridor.factor_step, par_.corridor.factor_initial,
+                                            par_.corridor.factor_final);
   if (par_.dyn.heat_horizon <= 0.0 && par_.dyn.max_horizon > 0.0)
   {
     par_.dyn.heat_horizon = std::max(par_.dyn.prediction_horizon, par_.dyn.max_horizon + par_.dyn.stop_dwell);
@@ -556,12 +589,14 @@ double Rmader::timeAllocationFactor(double dist_to_terminal_goal)
 Rmader::Subgoal Rmader::subgoalAroundObservedObstacles(const mt::state& A, const mt::state& G_term, double ra,
                                                        double t_start, Eigen::Vector3d& G)
 {
-  if (!par_.dyn.enabled || !par_.dyn.global_path_enabled || ra <= 0.0)
+  corridor_path_.clear();
+  map_now_ = mapSnapshot();
+  if ((!par_.dyn.enabled && !par_.corridor.enabled) || !par_.dyn.global_path_enabled || ra <= 0.0)
   {
     return Subgoal::UNCHANGED;
   }
   const std::vector<dynobs::Track> tracks = getObservedTracks();
-  if (tracks.empty())
+  if (tracks.empty() && !par_.corridor.enabled)
   {
     return Subgoal::UNCHANGED;
   }
@@ -575,9 +610,91 @@ Rmader::Subgoal Rmader::subgoalAroundObservedObstacles(const mt::state& A, const
   request.planar = par_.ground_robot;
 
   std::vector<Eigen::Vector3d> path;
-  if (!dynobs::planGlobalPath(request, tracks, par_.dyn, path))
+  if (par_.corridor.enabled)
+  {
+    // The corridor optimiser stays around this path, so it also has to avoid what the search of the
+    // B-spline backend finds its own way around: the teammates. The grid path is then straightened
+    // wherever that neither crosses a blocked cell nor a hotter one than the path already does.
+    const dynobs::GlobalPathExtras extras = globalPathExtras(t_start, ra);
+    if (!dynobs::planGlobalPath(request, tracks, par_.dyn, path, &extras))
+    {
+      return Subgoal::UNCHANGED;
+    }
+    if ((path.back() - request.goal).norm() < 1.5 * par_.dyn.global_resolution)
+    {
+      path.back() = request.goal;  // the search ends at the centre of the goal's cell
+    }
+    const double margin = par_.dyn.base_inflation + par_.dyn.obst_position_error;
+    auto heat_at = [&](const Eigen::Vector3d& q) {
+      const double dynamic = dynobs::heat(q, tracks, par_.dyn);
+      return extras.heat ? std::max(dynamic, extras.heat(q)) : dynamic;
+    };
+    auto blocked_at = [&](const Eigen::Vector3d& q) {
+      for (const dynobs::Track& track : tracks)
+      {
+        const Eigen::Vector3d reach = 0.5 * track.bbox + request.agent_half_size + Eigen::Vector3d::Constant(margin);
+        if (((q - track.pos).cwiseAbs().array() <= reach.array()).all())
+        {
+          return true;
+        }
+      }
+      return extras.blocked && extras.blocked(q);
+    };
+    double hottest = 0.0;
+    for (const Eigen::Vector3d& q : path)
+    {
+      hottest = std::max(hottest, heat_at(q));
+    }
+    const bool start_blocked = blocked_at(path.front());
+    path = corridor::shortcutPath(path, [&](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
+      const int samples = std::max(1, static_cast<int>(std::ceil((b - a).norm() / (0.5 * par_.dyn.global_resolution))));
+      for (int i = 0; i <= samples; ++i)
+      {
+        const Eigen::Vector3d q = a + (b - a) * (static_cast<double>(i) / samples);
+        if ((!start_blocked && blocked_at(q)) || heat_at(q) > hottest + 1e-6)
+        {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+  else if (!dynobs::planGlobalPath(request, tracks, par_.dyn, path))
   {
     return Subgoal::UNCHANGED;
+  }
+  if (par_.corridor.enabled && static_cast<int>(path.size()) > par_.corridor.num_polytopes + 1)
+  {
+    path.resize(par_.corridor.num_polytopes + 1);  // SANDO: the local goal is the (P+1)-th waypoint
+  }
+
+  if (par_.corridor.enabled)
+  {
+    // The corridor optimiser picks the end point itself, for each duration it tries (optimizeInCorridors):
+    // it gets the path as far as the planning radius.
+    double reach = std::min(ra, dynobs::pathLength(path));
+    if (par_.corridor.local_horizon > 0.0)
+    {
+      reach = std::min(reach, par_.corridor.local_horizon);  // SANDO's local_horizon
+    }
+    G = dynobs::pointAlongPath(path, reach);
+    double walked = 0.0;
+    corridor_path_.push_back(path.front());
+    for (size_t i = 1; i < path.size(); ++i)
+    {
+      const double length = (path[i] - path[i - 1]).norm();
+      if (walked + length >= reach)
+      {
+        break;
+      }
+      walked += length;
+      corridor_path_.push_back(path[i]);
+    }
+    if ((corridor_path_.back() - G).norm() > 1e-6)
+    {
+      corridor_path_.push_back(G);
+    }
+    return Subgoal::FOUND;
   }
 
   const double factor_alloc = timeAllocationFactor((G_term.pos - A.pos).norm());
@@ -611,6 +728,720 @@ Rmader::Subgoal Rmader::subgoalAroundObservedObstacles(const mt::state& A, const
   // Every point ahead can be reached by some obstacle before the robot could have stopped there and stood
   // for stop_dwell. Creeping forward anyway is how a robot ends up parked among the obstacles.
   return Subgoal::NONE_SAFE;
+}
+
+// ---- Map of static and unknown space ---------------------------------------------------------------------
+
+// Half the robot's box, without the height for a ground robot (its map is one layer of voxels).
+Eigen::Vector3d Rmader::mapHalfSize() const
+{
+  Eigen::Vector3d half = 0.5 * par_.drone_bbox;
+  if (par_.ground_robot)
+  {
+    half.z() = 0.0;
+  }
+  return half;
+}
+
+double Rmader::unknownSpeed() const
+{
+  return par_.map.unknown_max_vel >= 0.0 ? par_.map.unknown_max_vel : par_.dyn.obst_max_vel;
+}
+
+// SANDO's obstacle tracker on the scan (cloud_tracker.hpp): everything the rays ended on is clustered, the
+// clusters are followed by adaptive Kalman filters, and those that move are handed to the planner as
+// observations, exactly like the ones that arrive on /obstacle_observations. What does not move is left to
+// the static map.
+void Rmader::trackMovingObstacles(const Eigen::Vector3d& origin, const std::vector<Eigen::Vector3d>& points)
+{
+  if (!cloud_tracker_)
+  {
+    return;
+  }
+  std::vector<Eigen::Vector3d> hits;
+  for (const Eigen::Vector3d& point : points)
+  {
+    Eigen::Vector3d ray = point - origin;
+    if (par_.ground_robot)
+    {
+      ray.z() = 0.0;
+    }
+    if (point.allFinite() && ray.norm() < par_.map.sensor_range)
+    {
+      hits.push_back(point);
+    }
+  }
+  const double now = ros::Time::now().toSec();
+  std::vector<dynobs::Observation> moving;
+  {
+    std::lock_guard<std::mutex> lock(mtx_map_);
+    for (int id : cloud_tracker_->insert(hits, now))
+    {
+      const ctrack::Track* track = cloud_tracker_->find(id);
+      if (track == nullptr || track->updates < par_.tracker.min_updates ||
+          track->vel().norm() < par_.tracker.velocity_threshold)
+      {
+        continue;
+      }
+      dynobs::Observation obs;
+      obs.id = 5000 + track->id;
+      obs.stamp = now;
+      obs.pos = track->pos();
+      obs.vel = track->vel();
+      obs.has_vel = true;
+      obs.bbox = track->bbox + Eigen::Vector3d::Constant(2.0 * par_.tracker.bbox_padding);
+      if (par_.ground_robot)
+      {
+        obs.bbox.z() = par_.tracker.default_height;
+      }
+      moving.push_back(obs);
+    }
+  }
+  for (const dynobs::Observation& obs : moving)
+  {
+    updateObservedObstacle(obs);
+  }
+}
+
+void Rmader::updateMap(const Eigen::Vector3d& origin, const std::vector<Eigen::Vector3d>& points)
+{
+  if (!map_)
+  {
+    return;
+  }
+  trackMovingObstacles(origin, points);
+  // What is tracked as a moving obstacle is kept out of the static map, or it would leave a wall behind it.
+  std::vector<vmap::IgnoreBox> ignore;
+  const double now = ros::Time::now().toSec();
+  for (const dynobs::Track& track : getObservedTracks())
+  {
+    if (track.declared_static)
+    {
+      continue;
+    }
+    const dynobs::Box box =
+        dynobs::occupancyBox(track, now, now, par_.dyn, Eigen::Vector3d::Constant(par_.map.resolution));
+    vmap::IgnoreBox ignored;
+    ignored.lo = box.lo;
+    ignored.hi = box.hi;
+    if (par_.ground_robot)
+    {
+      ignored.lo.z() = -1e9;
+      ignored.hi.z() = 1e9;
+    }
+    ignore.push_back(ignored);
+  }
+  std::lock_guard<std::mutex> lock(mtx_map_);
+  map_->insertScan(origin, points, ignore);
+}
+
+std::shared_ptr<const vmap::VoxelMap> Rmader::mapSnapshot()
+{
+  if (!map_)
+  {
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> lock(mtx_map_);
+  return std::make_shared<const vmap::VoxelMap>(*map_);
+}
+
+// What the global search has to know about the teammates and the broadcast obstacles: where each is at
+// t_start (blocked), and heat along what it has committed to do during `horizon_time`.
+dynobs::GlobalPathExtras Rmader::globalPathExtras(double t_start, double ra)
+{
+  struct Body
+  {
+    Eigen::Vector3d now;
+    Eigen::Vector3d reach;  // half sizes of the body and of this agent, plus margins
+    double radius;          // of the heat around its path
+    std::vector<std::pair<double, Eigen::Vector3d>> path;
+  };
+  auto bodies = std::make_shared<std::vector<Body>>();
+  const double horizon_time = (par_.dyn.heat_horizon > 0.0) ? par_.dyn.heat_horizon : par_.dyn.prediction_horizon;
+  const int samples = std::max(2, par_.dyn.heat_num_samples);
+
+  mtx_trajs_.lock();
+  for (auto& traj : trajs_)
+  {
+    if (traj.is_observed)
+    {
+      continue;  // the tracks are passed to the search directly
+    }
+    Body body;
+    body.now = centerOfObstacle(traj, t_start);
+    if ((body.now - state_.pos).norm() > ra + par_.dyn.global_window)
+    {
+      continue;
+    }
+    body.reach = 0.5 * traj.bbox + 0.5 * par_.drone_bbox + (par_.beta + par_.alpha) * Eigen::Vector3d::Ones();
+    body.radius = body.reach.maxCoeff() + par_.dyn.base_inflation + 0.5;
+    for (int j = 0; j < samples; ++j)
+    {
+      const double t = horizon_time * j / (samples - 1.0);
+      body.path.emplace_back(t, centerOfObstacle(traj, t_start + t));
+    }
+    bodies->push_back(body);
+  }
+  mtx_trajs_.unlock();
+
+  dynobs::GlobalPathExtras extras;
+  const std::shared_ptr<const vmap::VoxelMap> map = map_now_;
+  if (bodies->empty() && !map)
+  {
+    return extras;
+  }
+  const dynobs::Params dyn = par_.dyn;
+  // SANDO's global planner: occupied voxels grown by the robot's size are blocked, unknown ones are free.
+  const Eigen::Vector3d map_half = mapHalfSize() + Eigen::Vector3d::Constant(par_.dyn.base_inflation);
+  extras.blocked = [bodies, map, map_half](const Eigen::Vector3d& q) {
+    for (const Body& body : *bodies)
+    {
+      if (((q - body.now).cwiseAbs().array() <= body.reach.array()).all())
+      {
+        return true;
+      }
+    }
+    return map && map->collides(q, map_half);
+  };
+  extras.heat = [bodies, dyn, map](const Eigen::Vector3d& q) {
+    double hottest = map ? map->staticHeat(q) : 0.0;
+    for (const Body& body : *bodies)
+    {
+      hottest = std::max(hottest, dynobs::knownPathHeat(q, body.path, body.radius, dyn));
+    }
+    return hottest;
+  };
+  return extras;
+}
+
+// Ground robots turn on the spot towards where the path first leads, which with a path around obstacles is
+// not where the subgoal is.
+mt::state Rmader::turnTarget(const mt::state& A, const mt::state& G)
+{
+  mt::state target = G;
+  if (par_.corridor.enabled && corridor_path_.size() >= 2 && (corridor_path_.front() - A.pos).norm() < 1e-3 &&
+      (corridor_path_.back() - G.pos).norm() < 1e-3)
+  {
+    target.pos = corridor_path_[1];
+  }
+  return target;
+}
+
+void Rmader::getOptimizedPwp(mt::PieceWisePol& pwp)
+{
+  if (par_.corridor.enabled)
+  {
+    pwp = corridor_pwp_;
+  }
+  else
+  {
+    solver_->getSolution(pwp);
+  }
+}
+
+// Same limits as SolverNlopt::groundPathFeasible, on the pieces of the corridor optimiser: bounded yaw rate,
+// no flip of the heading through a stop, and a first piece that leaves within the heading cone.
+bool Rmader::groundFeasible(const corridor::Solution& solution, double yaw)
+{
+  constexpr double speed_floor2 = 0.0025;
+  const double hx = std::cos(yaw);
+  const double hy = std::sin(yaw);
+  const double cone = std::tan(par_.ground_heading_cone_rad);
+  bool have_heading = false;
+  double previous_heading = 0.0;
+  double previous_time = 0.0;
+  const int pieces = solution.control_points.size();
+  for (int n = 0; n < pieces; ++n)
+  {
+    for (int j = 1; j <= 19; ++j)
+    {
+      const double t = (n + j / 20.0) * solution.dt;
+      const Eigen::Vector3d v = solution.vel(t);
+      const Eigen::Vector3d a = solution.acc(t);
+      const double cross = v.x() * a.y() - v.y() * a.x();
+      if (std::abs(cross) > par_.ground_max_yaw_rate * (v.head<2>().squaredNorm() + speed_floor2) + 0.002)
+      {
+        return false;
+      }
+      if (v.head<2>().norm() > 0.025)
+      {
+        const double heading = std::atan2(v.y(), v.x());
+        if (have_heading)
+        {
+          const double change = std::atan2(std::sin(heading - previous_heading), std::cos(heading - previous_heading));
+          if (std::abs(change) > par_.ground_max_yaw_rate * (t - previous_time) + 0.1)
+          {
+            return false;
+          }
+        }
+        previous_heading = heading;
+        previous_time = t;
+        have_heading = true;
+      }
+      if (n == 0)
+      {
+        const double forward = hx * v.x() + hy * v.y();
+        const double lateral = -hy * v.x() + hx * v.y();
+        if (forward < -0.01 || std::abs(lateral) > cone * forward + 0.01)
+        {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+// SANDO's local planning step (paper Section VI, src/sando/sando.cpp planLocalTrajectory) with R-MADER's
+// obstacle model: for each time-allocation factor of the window, the convex hulls R-MADER builds for every
+// teammate and obstacle over the N intervals of the trajectory are turned into time-layered polytopes around
+// the global path, and the trajectory is optimised inside them. The polytopes are built from points sampled
+// on the hulls, so before a trajectory is accepted each of its pieces is checked against each hull with the
+// separating-plane LP that R-MADER uses everywhere else. The result goes through R-MADER's own check,
+// delay check and commit unchanged.
+bool Rmader::optimizeInCorridors(mt::state& A, const mt::state& initial, const mt::state& final, double t_start,
+                                 double max_runtime, mt::Edges& edges_obstacles_out,
+                                 std::vector<Hyperplane3D>& planes)
+{
+  MyTimer timer(true);
+  const mt::corridorParams& cp = par_.corridor;
+  const int N = cp.num_pieces;
+
+  // ---- Global path: the one behind the subgoal if there is one, else the straight line.
+  std::vector<Eigen::Vector3d> path;
+  if (corridor_path_.size() >= 2 && (corridor_path_.front() - initial.pos).norm() < 1e-3 &&
+      (corridor_path_.back() - final.pos).norm() < 1e-3)
+  {
+    path = corridor_path_;
+  }
+  else
+  {
+    path = { initial.pos, final.pos };
+  }
+  const std::vector<Eigen::Vector3d> full_path = path;
+  const double full_length = dynobs::pathLength(full_path);
+  if (full_length < 1e-3)
+  {
+    return false;
+  }
+
+  corridor::Problem problem;
+  problem.num_pieces = N;
+  problem.start.pos = initial.pos;
+  problem.start.vel = initial.vel;
+  problem.start.acc = initial.accel;
+  problem.limits.v_max = par_.v_max;
+  problem.limits.a_max = par_.a_max;
+  problem.limits.j_max = par_.j_max;
+  problem.lower << par_.x_min, par_.y_min, par_.z_min;
+  problem.upper << par_.x_max, par_.y_max, par_.z_max;
+  problem.exhaustive = cp.exhaustive;
+  if (par_.ground_robot)
+  {
+    problem.heading_cone = true;
+    problem.heading = initial.yaw;
+    problem.heading_cone_tan = std::tan(par_.ground_heading_cone_rad);
+  }
+
+  corridor::DecompOptions options;
+  options.local_bbox = cp.local_bbox;
+  options.planar = par_.ground_robot;
+  options.z_min = initial.pos.z() - cp.planar_half_height;
+  options.z_max = initial.pos.z() + cp.planar_half_height;
+
+  // Map voxels are plain points: the polytopes keep the robot's circumscribed radius away from them (SANDO),
+  // plus half a voxel because a point stands for a whole voxel.
+  const std::shared_ptr<const vmap::VoxelMap> map = map_now_;
+  const Eigen::Vector3d half = mapHalfSize();
+  const bool grow_unknown = map && par_.map.inflate_unknown;
+  if (map)
+  {
+    Eigen::Vector3d reach = half + Eigen::Vector3d::Constant(0.5 * map->params().resolution);
+    if (par_.ground_robot)
+    {
+      reach.z() = 0.0;
+    }
+    options.shrink = reach.norm();
+  }
+
+  problem.goal.pos = full_path.back();
+  const double longest_dt0 =
+      std::max(corridor::initialDt(problem.start, problem.goal, problem.limits, N), 2.0 * par_.dc);
+
+  mtx_trajs_.lock();
+  time_init_opt_ = ros::Time::now().toSec();
+  pruneObservedObstacles(time_init_opt_);
+  removeTrajsThatWillNotAffectMe(A, t_start, t_start + N * longest_dt0 * cp.factor_final);
+  mtx_trajs_.unlock();
+  // The map is as of now, the plan starts at t_start: an unseen obstacle has had that long already.
+  const double lead = std::max(0.0, t_start - ros::Time::now().toSec());
+  const double walk_step = std::max(par_.dyn.global_resolution, 0.05);
+
+  const Eigen::Vector3d tiny = Eigen::Vector3d::Constant(0.01);  // as in trajsAndPwpAreInCollision_with_inflation
+  auto cube = [&](const Eigen::Vector3d& c, std::vector<Eigen::Vector3d>& out) {
+    for (int k = 0; k < 8; ++k)
+    {
+      out.emplace_back(c.x() + ((k & 1) ? tiny.x() : -tiny.x()), c.y() + ((k & 2) ? tiny.y() : -tiny.y()),
+                       c.z() + ((k & 4) ? tiny.z() : -tiny.z()));
+    }
+  };
+
+  // Where a polytope can contain a point: further than `shrink` from every occupied voxel and from the
+  // unknown region grown by `unseen` (see the note on shrink above).
+  auto map_clear = [&](const Eigen::Vector3d& q, double unseen) {
+    return map->distanceToOccupied(q) > options.shrink && !map->nearUnknown(q, unseen + options.shrink);
+  };
+
+  int no_end = 0, no_solution = 0, no_turn = 0, no_separation = 0, empty_polytopes = 0;
+  const std::vector<double> factors = corridor_factors_.factors();
+  // Every factor is first tried with the end point as far along the path as it can be. Where the corridors
+  // then leave no trajectory, a nearer end point can: a shorter plan gives the obstacles, and what may come
+  // out of unknown space, less time to spread (paper Section IV-C, safe subgoal).
+  std::vector<std::pair<double, double>> attempts;  // (factor, part of the path the end point may use)
+  for (double part : { 1.0, 0.6, 0.36 })
+  {
+    for (double factor : factors)
+    {
+      attempts.emplace_back(factor, part);
+    }
+  }
+  std::set<double> without_end;  // factors for which no point of the path is a safe end
+  for (const auto& attempt : attempts)
+  {
+    const double factor = attempt.first;
+    if (timer.ElapsedMs() > 1000.0 * max_runtime)
+    {
+      break;
+    }
+    if (without_end.count(factor) > 0)
+    {
+      continue;
+    }
+    Eigen::Vector3d normal;
+    double offset;
+
+    // ---- End point (SANDO's safe subgoal, Section IV-C, for this factor): the furthest point of the
+    // path where the robot can stop and stand, clear of everything for the dwell, given how long the
+    // plan to that point takes with this factor.
+    bool end_found = false;
+    double dt = 0.0;
+    for (double reach = attempt.second * full_length; reach > 0.5 * walk_step; reach -= walk_step)
+    {
+      const Eigen::Vector3d candidate = dynobs::pointAlongPath(full_path, reach);
+      problem.goal.pos = candidate;
+      dt = factor * std::max(corridor::initialDt(problem.start, problem.goal, problem.limits, N), 2.0 * par_.dc);
+      const double t_end = t_start + N * dt;
+      std::vector<Eigen::Vector3d> end_points;
+      cube(candidate, end_points);
+      bool clear = true;
+      mtx_trajs_.lock();
+      observed_extra_margin_ = par_.dyn.planning_margin;
+      for (auto& traj : trajs_)
+      {
+        const double dwell = traj.is_observed ? std::max(dt, par_.dyn.stop_dwell) : dt;
+        if (!separator_solver_->solveModel(normal, offset, end_points, vertexesOfInterval(traj, t_end, t_end + dwell)))
+        {
+          clear = false;
+          break;
+        }
+      }
+      observed_extra_margin_ = 0.0;
+      mtx_trajs_.unlock();
+      if (clear && map)
+      {
+        // The paper's worst-case radius: what an unseen obstacle covers by the end of the plan.
+        const double unseen = grow_unknown ? unknownSpeed() * (lead + N * dt) : 0.0;
+        clear = map_clear(candidate, unseen);
+      }
+      if (clear)
+      {
+        end_found = true;
+        // The seed of the corridor: the path as far as that point, in P segments.
+        std::vector<Eigen::Vector3d> prefix = { full_path.front() };
+        double walked = 0.0;
+        for (size_t i = 1; i < full_path.size(); ++i)
+        {
+          const double length = (full_path[i] - full_path[i - 1]).norm();
+          if (walked + length >= reach)
+          {
+            break;
+          }
+          walked += length;
+          prefix.push_back(full_path[i]);
+        }
+        if ((prefix.back() - candidate).norm() > 1e-6)
+        {
+          prefix.push_back(candidate);
+        }
+        path = corridor::shapePath(prefix, cp.num_polytopes, cp.min_segment_length, nullptr);
+        if ((path.back() - candidate).norm() > 1e-6)
+        {
+          end_found = false;  // more corners than segments before this point: try a nearer one
+          continue;
+        }
+        break;
+      }
+    }
+    if (!end_found || path.size() < 2)
+    {
+      no_end++;
+      without_end.insert(factor);
+      continue;
+    }
+    problem.dt = dt;
+
+    // Vertices of what every teammate and obstacle can occupy in each interval.
+    std::vector<std::vector<std::vector<Eigen::Vector3d>>> vertices;
+    mtx_trajs_.lock();
+    observed_extra_margin_ = par_.dyn.planning_margin;
+    for (auto& traj : trajs_)
+    {
+      std::vector<std::vector<Eigen::Vector3d>> of_traj(N);
+      for (int n = 0; n < N; ++n)
+      {
+        of_traj[n] = vertexesOfInterval(traj, t_start + n * dt, t_start + (n + 1) * dt);
+      }
+      vertices.push_back(of_traj);
+    }
+    observed_extra_margin_ = 0.0;
+    mtx_trajs_.unlock();
+
+    // Points on the surface of every hull, per time layer.
+    std::vector<corridor::LayerPoints> layers(N);
+    for (const auto& of_traj : vertices)
+    {
+      for (int n = 0; n < N; ++n)
+      {
+        const auto& points = of_traj[n];
+        if (points.empty())
+        {
+          continue;
+        }
+        if (points.size() <= 8)  // a box (observed obstacle, silent teammate)
+        {
+          Eigen::Vector3d lo = points.front(), hi = points.front();
+          for (const Eigen::Vector3d& q : points)
+          {
+            lo = lo.cwiseMin(q);
+            hi = hi.cwiseMax(q);
+          }
+          corridor::sampleBox(lo, hi, cp.sample_spacing, layers[n].inflated);
+          continue;
+        }
+        std::vector<Point_3> points_cgal;
+        for (const Eigen::Vector3d& q : points)
+        {
+          points_cgal.push_back(Point_3(q.x(), q.y(), q.z()));
+        }
+        const CGAL_Polyhedron_3 hull = cu::convexHullOfPoints(points_cgal);
+        for (auto facet = hull.facets_begin(); facet != hull.facets_end(); ++facet)
+        {
+          auto h = facet->facet_begin();
+          const Point_3 p0 = h->vertex()->point();
+          ++h;
+          Point_3 previous = h->vertex()->point();
+          ++h;
+          for (; h != facet->facet_begin(); ++h)  // fan over the facet
+          {
+            const Point_3 current = h->vertex()->point();
+            corridor::sampleTriangle(Eigen::Vector3d(p0.x(), p0.y(), p0.z()),
+                                     Eigen::Vector3d(previous.x(), previous.y(), previous.z()),
+                                     Eigen::Vector3d(current.x(), current.y(), current.z()), cp.sample_spacing,
+                                     layers[n].inflated);
+            previous = current;
+          }
+        }
+      }
+    }
+
+    // Static and unknown space (paper Section IV-C): occupied voxels, and the unknown region grown by
+    // r_n = v_obs * (time to the end of layer n), the same radius the dynamic obstacles get.
+    std::vector<double> unseen_reach(N, 0.0);
+    if (map)
+    {
+      Eigen::Vector3d lo = path.front(), hi = path.front();
+      for (const Eigen::Vector3d& q : path)
+      {
+        lo = lo.cwiseMin(q);
+        hi = hi.cwiseMax(q);
+      }
+      for (int n = 0; n < N; ++n)
+      {
+        unseen_reach[n] =
+            grow_unknown ? unknownSpeed() * (lead + (n + 1) * dt) + par_.dyn.obst_position_error : 0.0;
+        const Eigen::Vector3d reach =
+            Eigen::Vector3d::Constant(options.local_bbox.norm() + options.shrink + unseen_reach[n] + 1.0);
+        const size_t first = layers[n].raw.size();
+        map->occupiedSurface(lo - reach, hi + reach, layers[n].raw);
+        map->unknownSurface(lo - reach, hi + reach, unseen_reach[n], layers[n].raw);
+        if (par_.ground_robot)
+        {
+          for (size_t k = first; k < layers[n].raw.size(); ++k)
+          {
+            layers[n].raw[k].z() = initial.pos.z();  // the map of a ground robot has one layer
+          }
+        }
+      }
+    }
+
+    problem.corridors = corridor::buildCorridors(path, layers, options);
+
+    // A polytope is built around its path segment from points on the outside of what is in the way. If
+    // the segment itself is inside an obstacle's hull, or inside occupied or grown unknown space, during
+    // that layer, what comes out is a region inside the obstacle: that layer cannot use that segment.
+    for (int n = 0; n < N; ++n)
+    {
+      for (size_t p = 0; p + 1 < path.size(); ++p)
+      {
+        if (problem.corridors[n][p].empty())
+        {
+          empty_polytopes++;
+          continue;
+        }
+        bool blocked = false;
+        const std::vector<Eigen::Vector3d> segment = { path[p], path[p + 1] };
+        for (const auto& of_traj : vertices)
+        {
+          if (!separator_solver_->solveModel(normal, offset, segment, of_traj[n]))
+          {
+            blocked = true;
+            break;
+          }
+        }
+        if (!blocked && map)
+        {
+          const double step = 0.5 * map->params().resolution;
+          const int samples = std::max(1, static_cast<int>(std::ceil((path[p + 1] - path[p]).norm() / step)));
+          for (int k = 0; k <= samples && !blocked; ++k)
+          {
+            const Eigen::Vector3d q = path[p] + (path[p + 1] - path[p]) * (static_cast<double>(k) / samples);
+            blocked = !map_clear(q, unseen_reach[n]);
+          }
+        }
+        if (blocked)
+        {
+          problem.corridors[n][p] = corridor::Polytope();
+        }
+        empty_polytopes += problem.corridors[n][p].empty();
+      }
+    }
+
+    corridor::Solution solution;
+    if (!corridor::solve(problem, solution))
+    {
+      no_solution++;
+      continue;
+    }
+    if (par_.ground_robot && !groundFeasible(solution, initial.yaw))
+    {
+      no_turn++;
+      continue;
+    }
+
+    // Exact check: every piece is separated by a plane from every hull of its interval.
+    std::vector<Hyperplane3D> found_planes;
+    bool separated = true;
+    for (size_t i = 0; i < vertices.size() && separated; ++i)
+    {
+      for (int n = 0; n < N; ++n)
+      {
+        std::vector<Eigen::Vector3d> piece;
+        for (int j = 0; j < 4; ++j)
+        {
+          cube(solution.control_points[n].col(j), piece);
+        }
+        if (!separator_solver_->solveModel(normal, offset, piece, vertices[i][n]))
+        {
+          separated = false;
+          break;
+        }
+        found_planes.push_back(Hyperplane3D(-offset * normal / normal.squaredNorm(), normal));
+      }
+    }
+    if (separated && map)
+    {
+      // The voxels are points to the polytopes; this looks at the robot's box against whole voxels.
+      const double step = std::min(par_.dc, 0.5 * map->params().resolution / std::max(par_.v_max.maxCoeff(), 1e-3));
+      for (double t = 0.0; t <= solution.duration() && separated; t += step)
+      {
+        separated = !map->collides(solution.pos(t), half);
+      }
+    }
+    if (!separated)
+    {
+      no_separation++;
+      continue;
+    }
+
+    // ---- Accepted: hand the trajectory over in the forms the rest of the planner uses.
+    corridor_pwp_.clear();
+    for (int n = 0; n <= N; ++n)
+    {
+      corridor_pwp_.times.push_back(t_start + n * dt);
+    }
+    for (int n = 0; n < N; ++n)
+    {
+      const Eigen::Matrix<double, 3, 4> coefficients = solution.polynomial(n);
+      corridor_pwp_.coeff_x.push_back(coefficients.row(0).transpose());
+      corridor_pwp_.coeff_y.push_back(coefficients.row(1).transpose());
+      corridor_pwp_.coeff_z.push_back(coefficients.row(2).transpose());
+    }
+
+    solver_->traj_solution_.clear();
+    const double duration = solution.duration();
+    for (double t = 0.0; t <= duration; t += par_.dc)
+    {
+      mt::state sample;
+      sample.setPos(solution.pos(t));
+      sample.setVel(solution.vel(t));
+      sample.setAccel(solution.acc(t));
+      sample.setJerk(solution.jerk(t));
+      solver_->traj_solution_.push_back(sample);
+    }
+    mt::state rest;
+    rest.setPos(problem.goal.pos);
+    solver_->traj_solution_.back() = rest;
+
+    planes = found_planes;
+    ConvexHullsOfCurves hulls_for_display;
+    for (const auto& of_traj : vertices)
+    {
+      ConvexHullsOfCurve of_curve;
+      for (int n = 0; n < N; ++n)
+      {
+        std::vector<Point_3> points_cgal;
+        for (const Eigen::Vector3d& q : of_traj[n])
+        {
+          points_cgal.push_back(Point_3(q.x(), q.y(), q.z()));
+        }
+        if (points_cgal.size() >= 4)
+        {
+          of_curve.push_back(cu::convexHullOfPoints(points_cgal));
+        }
+      }
+      hulls_for_display.push_back(of_curve);
+    }
+    edges_obstacles_out = cu::vectorGCALPol2edges(hulls_for_display);
+
+    corridor_factors_.succeeded(factor);
+    ROS_INFO_STREAM_THROTTLE(2.0, "[corridor] factor " << factor << ", dt " << dt << " s, " << path.size() - 1
+                                                       << " segments, " << solution.qps_solved << " QPs, "
+                                                       << timer.ElapsedMs() << " ms");
+    return true;
+  }
+
+  corridor_factors_.failed();
+  ROS_INFO_STREAM_THROTTLE(1.0, "[corridor] no trajectory for factors " << factors.front() << " to "
+                                                                        << factors.back() << ": " << no_end
+                                                                        << " end point not clear, " << no_solution
+                                                                        << " no solution in the corridors, "
+                                                                        << no_turn << " too sharp for the rover, "
+                                                                        << no_separation << " failed the exact check ("
+                                                                        << empty_polytopes << " of "
+                                                                        << (no_solution + no_turn + no_separation) * N *
+                                                                               cp.num_polytopes
+                                                                        << " polytopes unusable)");
+  return false;
 }
 
 // Stopped somewhere other than the goal (the committed plan ran out and replanning has not produced a new
@@ -2003,7 +2834,7 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
     // is the heading that the new path must continue; at a stop use the rover.
     initial.yaw = initial.vel.head<2>().norm() > 0.05
                       ? std::atan2(initial.vel.y(), initial.vel.x()) : state_.yaw;
-    if (groundTurnNeeded(A, G))
+    if (groundTurnNeeded(A, turnTarget(A, G)))
     {
       return false;  // turning on the spot first, see getDesiredYaw
     }
@@ -2031,6 +2862,14 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
 
   double t_start = k_index * par_.dc + time_now_;
 
+  bool result = false;
+  bool is_q0_fail = false;
+  if (par_.corridor.enabled)
+  {
+    result = optimizeInCorridors(A, initial, final, t_start, runtime_snlopt, edges_obstacles_out, planes);
+  }
+  else
+  {
   double factor_alloc = timeAllocationFactor(distA2TermGoal);
 
   double time_allocated = factor_alloc * mu::getMinTimeDoubleIntegrator3D(initial.pos, initial.vel, final.pos,
@@ -2090,8 +2929,8 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
 
   bool is_stuck;
   bool is_A_star_failed;
-  bool is_q0_fail = false;
-  bool result = solver_->optimize(is_stuck, is_A_star_failed, is_q0_fail);  // calling the solver
+  result = solver_->optimize(is_stuck, is_A_star_failed, is_q0_fail);  // calling the solver
+  }
 
   // if (!result){
   //   // std::cout << "q0_fail_count_ is " << q0_fail_count_ << std::endl;
@@ -2162,7 +3001,10 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
     return false;
   }
 
-  solver_->getPlanes(planes);
+  if (!par_.corridor.enabled)
+  {
+    solver_->getPlanes(planes);
+  }
 
   solutions_found_++;
 
@@ -2172,7 +3014,7 @@ bool Rmader::replan_with_delaycheck(mt::Edges& edges_obstacles_out, std::vector<
   // std::cout << blue << "Average improvement so far" << std::setprecision(5) << av_improvement_nlopt_ << reset
   //          << std::endl;
 
-  solver_->getSolution(pwp_now);
+  getOptimizedPwp(pwp_now);
 
   // // check if the current position/plan is colliding
   // if (is_pop_up_initialized_){
@@ -2605,7 +3447,7 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
   {
     initial.yaw = initial.vel.head<2>().norm() > 0.05
                       ? std::atan2(initial.vel.y(), initial.vel.x()) : state_.yaw;
-    if (groundTurnNeeded(A, G))
+    if (groundTurnNeeded(A, turnTarget(A, G)))
     {
       return false;  // turning on the spot first, see getDesiredYaw
     }
@@ -2627,6 +3469,14 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
 
   double t_start = k_index * par_.dc + time_now;
 
+  bool result = false;
+  bool is_q0_fail = false;
+  if (par_.corridor.enabled)
+  {
+    result = optimizeInCorridors(A, initial, final, t_start, runtime_snlopt, edges_obstacles_out, planes);
+  }
+  else
+  {
   double factor_alloc = timeAllocationFactor(distA2TermGoal);
 
   double time_allocated = factor_alloc * mu::getMinTimeDoubleIntegrator3D(initial.pos, initial.vel, final.pos,
@@ -2678,9 +3528,9 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
 
   bool is_stuck;
   bool is_A_star_failed;
-  bool is_q0_fail;
 
-  bool result = solver_->optimize(is_stuck, is_A_star_failed, is_q0_fail);  // calling the solver
+  result = solver_->optimize(is_stuck, is_A_star_failed, is_q0_fail);  // calling the solver
+  }
 
   // right after taking off, sometims drones cannot find a path
   // sometimes the very initial path search takes more than how_many_A_star_failure counts and fails
@@ -2736,7 +3586,10 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
     return false;
   }
 
-  solver_->getPlanes(planes);
+  if (!par_.corridor.enabled)
+  {
+    solver_->getPlanes(planes);
+  }
 
   solutions_found_++;
 
@@ -2747,7 +3600,7 @@ bool Rmader::replan(mt::Edges& edges_obstacles_out, std::vector<mt::state>& X_sa
   //          << std::endl;
 
   mt::PieceWisePol pwp_now;
-  solver_->getSolution(pwp_now);
+  getOptimizedPwp(pwp_now);
 
   // // check if the current position/plan is colliding
   // if (is_pop_up_initialized_){

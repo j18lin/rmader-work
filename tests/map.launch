@@ -1,0 +1,31 @@
+<launch>
+  <!-- One rover on the corridor backend with a map built from range scans. Driver: tests/map_test.py -->
+  <arg name="map" default="true"/>
+  <arg name="inflate_unknown" default="true"/>
+  <arg name="sensor_range" default="4.0"/>
+  <arg name="dyn_enabled" default="true"/>
+  <arg name="obst_max_vel" default="0.25"/>
+  <arg name="stop_dwell" default="4.0"/>
+  <arg name="unknown_max_vel" default="-1.0"/>
+  <arg name="tracker" default="false"/>
+  <arg name="local_horizon" default="0.0"/>
+
+  <include file="$(dirname)/_observed_agent.launch">
+    <arg name="ns" value="SQ01s"/>
+    <arg name="agents_ids" value="[1]"/>
+    <arg name="ground" value="true"/>
+    <arg name="corridor" value="true"/>
+    <arg name="map" value="$(arg map)"/>
+    <arg name="inflate_unknown" value="$(arg inflate_unknown)"/>
+    <arg name="sensor_range" value="$(arg sensor_range)"/>
+    <arg name="dyn_enabled" value="$(arg dyn_enabled)"/>
+    <arg name="obst_max_vel" value="$(arg obst_max_vel)"/>
+    <arg name="hover_avoidance" value="true"/>
+    <arg name="evade_trigger" value="3.0"/>
+    <arg name="escape" value="true"/>
+    <arg name="stop_dwell" value="$(arg stop_dwell)"/>
+    <arg name="unknown_max_vel" value="$(arg unknown_max_vel)"/>
+    <arg name="tracker" value="$(arg tracker)"/>
+    <arg name="local_horizon" value="$(arg local_horizon)"/>
+  </include>
+</launch>

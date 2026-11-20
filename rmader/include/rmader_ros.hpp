@@ -28,6 +28,7 @@
 #include <rmader_msgs/ObstacleObservation.h>
 #include <rmader_msgs/Heartbeat.h>
 #include <std_msgs/Int8.h>
+#include <sensor_msgs/PointCloud2.h>
 #include <atomic>
 
 #include "utils.hpp"
@@ -63,6 +64,7 @@ private:
   void replanCB(const ros::TimerEvent& e);
   void trajCB(const rmader_msgs::DynTraj& msg);
   void obstacleObservationCB(const rmader_msgs::ObstacleObservation& msg);
+  void pointCloudCB(const sensor_msgs::PointCloud2& msg);
   void heartbeatCB(const rmader_msgs::Heartbeat& msg);
   void heartbeatTimerCB(const ros::TimerEvent& e);
   void commFaultCB(const std_msgs::Int8& msg);
@@ -141,6 +143,7 @@ private:
   ros::Subscriber sub_state_;
   ros::Subscriber sub_cent_traj_;
   ros::Subscriber sub_obstacle_obs_;
+  ros::Subscriber sub_point_cloud_;
   ros::Subscriber sub_heartbeat_;
   ros::Subscriber sub_comm_fault_;
   ros::Publisher pub_heartbeat_;

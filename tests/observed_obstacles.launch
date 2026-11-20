@@ -9,6 +9,7 @@
   <arg name="dyn_enabled" default="true"/>
   <arg name="delay_check" default="0.05"/>
   <arg name="planner_bbox" default="0.35"/>
+  <arg name="rover_bbox" default="0.7"/>
   <arg name="dyn_mode" default="reachable"/>
   <arg name="obst_max_vel" default="0.5"/>
   <arg name="obst_max_acc" default="1.0"/>
@@ -20,6 +21,7 @@
   <arg name="evade_trigger" default="1.5"/>
   <arg name="escape" default="false"/>
   <arg name="stop_dwell" default="1.5"/>
+  <arg name="corridor" default="false"/>
 
   <include file="$(dirname)/_observed_agent.launch" pass_all_args="false">
     <arg name="ns" value="SQ01s"/>
@@ -27,6 +29,7 @@
     <arg name="dyn_enabled" value="$(arg dyn_enabled)"/>
     <arg name="delay_check" value="$(arg delay_check)"/>
     <arg name="planner_bbox" value="$(arg planner_bbox)"/>
+    <arg name="rover_bbox" value="$(arg rover_bbox)"/>
     <arg name="dyn_mode" value="$(arg dyn_mode)"/>
     <arg name="obst_max_vel" value="$(arg obst_max_vel)"/>
     <arg name="obst_max_acc" value="$(arg obst_max_acc)"/>
@@ -38,6 +41,7 @@
     <arg name="evade_trigger" value="$(arg evade_trigger)"/>
     <arg name="escape" value="$(arg escape)"/>
     <arg name="stop_dwell" value="$(arg stop_dwell)"/>
+    <arg name="corridor" value="$(arg corridor)"/>
   </include>
   <include if="$(eval int(arg('agents')) >= 2)" file="$(dirname)/_observed_agent.launch">
     <arg name="ns" value="SQ02s"/>
@@ -45,6 +49,7 @@
     <arg name="dyn_enabled" value="$(arg dyn_enabled)"/>
     <arg name="delay_check" value="$(arg delay_check)"/>
     <arg name="planner_bbox" value="$(arg planner_bbox)"/>
+    <arg name="rover_bbox" value="$(arg rover_bbox)"/>
     <arg name="dyn_mode" value="$(arg dyn_mode)"/>
     <arg name="obst_max_vel" value="$(arg obst_max_vel)"/>
     <arg name="obst_max_acc" value="$(arg obst_max_acc)"/>
@@ -56,5 +61,6 @@
     <arg name="evade_trigger" value="$(arg evade_trigger)"/>
     <arg name="escape" value="$(arg escape)"/>
     <arg name="stop_dwell" value="$(arg stop_dwell)"/>
+    <arg name="corridor" value="$(arg corridor)"/>
   </include>
 </launch>

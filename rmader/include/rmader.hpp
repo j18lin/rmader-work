@@ -18,6 +18,11 @@
 #include <set>
 
 #include "rmader_types.hpp"
+#include "corridor_planner.hpp"
+#include "stsfc.hpp"
+#include "voxel_map.hpp"
+#include "cloud_tracker.hpp"
+#include <memory>
 
 #if USE_GUROBI_FLAG
 #include "solver_gurobi.hpp"
@@ -135,6 +140,32 @@ private:
   };
   Subgoal subgoalAroundObservedObstacles(const mt::state& A, const mt::state& G_term, double ra, double t_start,
                                          Eigen::Vector3d& G);
+  // --- SANDO's corridor optimiser as backend (par_.corridor) ---
+  bool optimizeInCorridors(mt::state& A, const mt::state& initial, const mt::state& final, double t_start,
+                           double max_runtime, mt::Edges& edges_obstacles_out, std::vector<Hyperplane3D>& planes);
+  void getOptimizedPwp(mt::PieceWisePol& pwp);
+  bool groundFeasible(const corridor::Solution& solution, double yaw);
+  dynobs::GlobalPathExtras globalPathExtras(double t_start, double horizon);
+  mt::state turnTarget(const mt::state& A, const mt::state& G);
+  // --- Map of static and unknown space (par_.map), used by the corridor backend ---
+public:
+  // One range scan in the world frame: where the sensor was and where its rays ended.
+  void updateMap(const Eigen::Vector3d& origin, const std::vector<Eigen::Vector3d>& points);
+  std::shared_ptr<const vmap::VoxelMap> mapSnapshot();
+
+private:
+  double unknownSpeed() const;
+  Eigen::Vector3d mapHalfSize() const;
+  void trackMovingObstacles(const Eigen::Vector3d& origin, const std::vector<Eigen::Vector3d>& points);
+  std::unique_ptr<ctrack::CloudTracker> cloud_tracker_;
+  std::unique_ptr<vmap::VoxelMap> map_;
+  std::mutex mtx_map_;
+  std::shared_ptr<const vmap::VoxelMap> map_now_;  // the map this replanning step works with
+
+  mt::PieceWisePol corridor_pwp_;
+  corridor::FactorWindow corridor_factors_;
+  std::vector<Eigen::Vector3d> corridor_path_;  // global path behind the current subgoal, if one was planned
+
   bool evasionSubgoal(const mt::state& A, double ra, Eigen::Vector3d& G);
   bool escapeSubgoal(const mt::state& A, const Eigen::Vector3d& G_straight, double t_start, Eigen::Vector3d& G);
   // Ground mode: true if the rover is stopped and has to turn on the spot before it can head for G.

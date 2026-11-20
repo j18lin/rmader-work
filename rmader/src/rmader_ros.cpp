@@ -6,6 +6,7 @@
  * See LICENSE file for the license information
  * -------------------------------------------------------------------------- */
 
+#include <sensor_msgs/point_cloud2_iterator.h>
 #include "rmader_ros.hpp"
 
 #include <sensor_msgs/point_cloud_conversion.h>
@@ -111,6 +112,75 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   nh1_.param("peer_silence/peer_max_vel", par_.peer_silence.peer_max_vel, par_.peer_silence.peer_max_vel);
   nh1_.param("peer_silence/forget_after", par_.peer_silence.forget_after, par_.peer_silence.forget_after);
   nh1_.param("peer_silence/fault_injection", par_.peer_silence.fault_injection, false);
+  nh1_.param("map/enabled", par_.map.enabled, false);
+  nh1_.param("map/resolution", par_.map.resolution, par_.map.resolution);
+  nh1_.param("map/sensor_range", par_.map.sensor_range, par_.map.sensor_range);
+  nh1_.param("map/inflate_unknown", par_.map.inflate_unknown, true);
+  nh1_.param("map/unknown_max_vel", par_.map.unknown_max_vel, par_.map.unknown_max_vel);
+  nh1_.param("map/heat_alpha", par_.map.heat_alpha, par_.map.heat_alpha);
+  nh1_.param("map/heat_power", par_.map.heat_power, par_.map.heat_power);
+  nh1_.param("map/heat_radius", par_.map.heat_radius, par_.map.heat_radius);
+  nh1_.param("map/hit", par_.map.hit, par_.map.hit);
+  nh1_.param("map/miss", par_.map.miss, par_.map.miss);
+  nh1_.param("tracker/enabled", par_.tracker.enabled, false);
+  nh1_.param("tracker/leaf_size", par_.tracker.leaf_size, par_.tracker.leaf_size);
+  nh1_.param("tracker/cluster_tolerance", par_.tracker.cluster_tolerance, par_.tracker.cluster_tolerance);
+  nh1_.param("tracker/min_cluster_size", par_.tracker.min_cluster_size, par_.tracker.min_cluster_size);
+  nh1_.param("tracker/bbox_cutoff", par_.tracker.bbox_cutoff, par_.tracker.bbox_cutoff);
+  nh1_.param("tracker/association_distance", par_.tracker.association_distance, par_.tracker.association_distance);
+  nh1_.param("tracker/adaptive", par_.tracker.adaptive, true);
+  nh1_.param("tracker/alpha", par_.tracker.alpha, par_.tracker.alpha);
+  nh1_.param("tracker/time_to_delete", par_.tracker.time_to_delete, par_.tracker.time_to_delete);
+  nh1_.param("tracker/velocity_threshold", par_.tracker.velocity_threshold, par_.tracker.velocity_threshold);
+  nh1_.param("tracker/min_updates", par_.tracker.min_updates, par_.tracker.min_updates);
+  nh1_.param("tracker/bbox_padding", par_.tracker.bbox_padding, par_.tracker.bbox_padding);
+  nh1_.param("tracker/default_height", par_.tracker.default_height, par_.tracker.default_height);
+  nh1_.param("corridor/enabled", par_.corridor.enabled, false);
+  nh1_.param("corridor/num_pieces", par_.corridor.num_pieces, par_.corridor.num_pieces);
+  nh1_.param("corridor/num_polytopes", par_.corridor.num_polytopes, par_.corridor.num_polytopes);
+  nh1_.param("corridor/factor_initial", par_.corridor.factor_initial, par_.corridor.factor_initial);
+  nh1_.param("corridor/factor_final", par_.corridor.factor_final, par_.corridor.factor_final);
+  nh1_.param("corridor/factor_step", par_.corridor.factor_step, par_.corridor.factor_step);
+  nh1_.param("corridor/factor_initial_mean", par_.corridor.factor_initial_mean, par_.corridor.factor_initial_mean);
+  nh1_.param("corridor/factor_radius", par_.corridor.factor_radius, par_.corridor.factor_radius);
+  nh1_.param("corridor/exhaustive", par_.corridor.exhaustive, false);
+  nh1_.param("corridor/sample_spacing", par_.corridor.sample_spacing, par_.corridor.sample_spacing);
+  nh1_.param("corridor/min_segment_length", par_.corridor.min_segment_length, par_.corridor.min_segment_length);
+  nh1_.param("corridor/local_horizon", par_.corridor.local_horizon, par_.corridor.local_horizon);
+  nh1_.param("corridor/planar_half_height", par_.corridor.planar_half_height, par_.corridor.planar_half_height);
+  {
+    std::vector<double> local_bbox;
+    if (nh1_.getParam("corridor/local_bbox", local_bbox) && local_bbox.size() == 3)
+    {
+      par_.corridor.local_bbox << local_bbox[0], local_bbox[1], local_bbox[2];
+    }
+  }
+  if (par_.corridor.enabled &&
+      (par_.corridor.num_pieces < 4 || par_.corridor.num_polytopes < 1 || par_.corridor.factor_step <= 0.0 ||
+       par_.corridor.factor_initial <= 0.0 || par_.corridor.factor_final < par_.corridor.factor_initial ||
+       par_.corridor.sample_spacing <= 0.0 || par_.corridor.local_bbox.minCoeff() <= 0.0))
+  {
+    ROS_FATAL("Invalid corridor parameters: need num_pieces >= 4, num_polytopes >= 1, factor_step > 0, "
+              "0 < factor_initial <= factor_final, sample_spacing > 0 and a positive local_bbox");
+    throw std::invalid_argument("corridor parameters");
+  }
+  bool observations_enabled = false;  // read again further down, with the rest of dyn_obstacles/*
+  nh1_.param("dyn_obstacles/enabled", observations_enabled, false);
+  if (par_.tracker.enabled &&
+      (!par_.map.enabled || !observations_enabled || par_.tracker.cluster_tolerance <= 0.0 ||
+       par_.tracker.association_distance <= 0.0 || par_.tracker.alpha <= 0.0 || par_.tracker.alpha > 1.0))
+  {
+    ROS_FATAL("Invalid tracker parameters: the tracker needs map/enabled (it works on the same scans) and "
+              "dyn_obstacles/enabled (it produces observations), positive distances and 0 < alpha <= 1");
+    throw std::invalid_argument("tracker parameters");
+  }
+  if (par_.map.enabled && (!par_.corridor.enabled || par_.map.resolution <= 0.0 || par_.map.sensor_range <= 0.0 ||
+                           par_.map.hit <= 0 || par_.map.miss <= 0))
+  {
+    ROS_FATAL("Invalid map parameters: the map needs corridor/enabled (the B-spline backend cannot use it), and "
+              "resolution, sensor_range, hit and miss have to be positive");
+    throw std::invalid_argument("map parameters");
+  }
   if (par_.peer_silence.enabled &&
       (par_.peer_silence.heartbeat_period <= 0.0 || par_.peer_silence.hold_after < 2.0 * par_.peer_silence.heartbeat_period ||
        par_.peer_silence.silent_after < par_.peer_silence.hold_after))
@@ -318,6 +388,11 @@ RmaderRos::RmaderRos(ros::NodeHandle nh1, ros::NodeHandle nh2, ros::NodeHandle n
   if (par_.dyn.enabled)
   {
     sub_obstacle_obs_ = nh4_.subscribe("/obstacle_observations", 50, &RmaderRos::obstacleObservationCB, this);
+  }
+  if (par_.map.enabled)
+  {
+    // Range scans in the world frame, taken from where the robot is.
+    sub_point_cloud_ = nh4_.subscribe("point_cloud", 2, &RmaderRos::pointCloudCB, this);
   }
 
   // Subscribers for trajs
@@ -535,6 +610,22 @@ void RmaderRos::commFaultCB(const std_msgs::Int8& msg)
 {
   comm_fault_ = msg.data;
   ROS_WARN("Injected communication fault set to %d (1 = deaf, 2 = mute, 3 = both)", static_cast<int>(msg.data));
+}
+
+void RmaderRos::pointCloudCB(const sensor_msgs::PointCloud2& msg)
+{
+  if (!published_initial_position_)
+  {
+    return;  // the sensor's position is the robot's
+  }
+  std::vector<Eigen::Vector3d> points;
+  points.reserve(msg.width * msg.height);
+  sensor_msgs::PointCloud2ConstIterator<float> x(msg, "x"), y(msg, "y"), z(msg, "z");
+  for (; x != x.end(); ++x, ++y, ++z)
+  {
+    points.emplace_back(*x, *y, *z);
+  }
+  rmader_ptr_->updateMap(state_.pos, points);
 }
 
 void RmaderRos::obstacleObservationCB(const rmader_msgs::ObstacleObservation& msg)

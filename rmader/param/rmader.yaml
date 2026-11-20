@@ -261,3 +261,73 @@ peer_silence:
   forget_after: 0.0         # [s] stop avoiding a teammate that has been silent this long. 0.0 --> never (its box
                             #     keeps growing, so a teammate that is gone for good ends up blocking everything)
   fault_injection: false    # tests only: obey ~sim_comm_fault (std_msgs/Int8: 1 = deaf, 2 = mute, 3 = both)
+
+###############################################################
+# SANDO's corridor optimiser as the planner's backend
+###############################################################
+# Port of the local planner of SANDO (arXiv 2604.07599, Section VI): the trajectory is N cubic pieces
+# optimised inside convex polytopes built around a global path, one set of polytopes per piece's time
+# interval. With this on it replaces R-MADER's search and B-spline optimisation; the result still goes
+# through R-MADER's check, delay check and two-step commit. See UGV_NOTES.md, "SANDO's optimiser as backend".
+
+corridor:
+  enabled: false
+  num_pieces: 5             # [N] cubic pieces = time layers. N - 3 free variables per axis are left to optimise
+  num_polytopes: 3          # [P] segments of the global path that get a polytope in every layer
+  factor_initial: 1.0       # time allocation dt = factor * dt0: lowest factor,
+  factor_final: 3.0         #   highest factor,
+  factor_step: 0.1          #   step,
+  factor_initial_mean: 1.5  #   centre of the first window,
+  factor_radius: 0.4        #   half width of the window, which follows the last factor that worked
+  exhaustive: false         # true --> every choice of polytope per piece (P^N), the optimum of SANDO's mixed-integer
+                            #   problem. false --> only choices that follow the path's order (same optimum in our tests)
+  local_bbox: [2.0, 2.0, 1.0] # [m] how far a polytope may reach around its path segment (along, across, up)
+  sample_spacing: 0.15      # [m] spacing of the points that stand for an obstacle's hull in the decomposition
+  min_segment_length: 0.2   # [m] the path is split into num_polytopes segments, but none shorter than this
+  local_horizon: 0.0        # [m] longest stretch of path one plan covers (SANDO's local_horizon). <= 0.0 --> Ra
+  planar_half_height: 0.5   # [m] ground robots: the polytopes are 2D polygons extruded over this half height
+
+###############################################################
+# Map of static and unknown space (needs corridor/enabled)
+###############################################################
+# SANDO's use of a voxel map (paper Sections IV-C and V-A): each voxel is free, occupied or unknown. The
+# global path avoids occupied voxels, treats unknown ones as free and pays a heat near obstacle surfaces;
+# the corridors treat unknown voxels as occupied and grow the unknown region, layer by layer, by what an
+# obstacle nobody has seen yet could cover. The map is built from range scans (sensor_msgs/PointCloud2 on
+# ~point_cloud, world frame, taken from the robot's position). Ground robots get one layer of voxels.
+
+map:
+  enabled: false
+  resolution: 0.15          # [m]
+  sensor_range: 6.0         # [m] a ray this long or longer met nothing
+  inflate_unknown: true     # false --> unknown space is an obstacle that stays where it is
+  unknown_max_vel: -1.0     # [m/s] speed of an obstacle that may come out of unknown space. < 0 --> obst_max_vel
+  heat_alpha: 5.0           # [alpha^s] static heat at an obstacle surface (paper Table II)
+  heat_power: 2.0           # [p^s]
+  heat_radius: -1.0         # [m] [R^s] reach of the static heat. < 0 --> three robot radii, as in the paper
+  hit: 3                    # evidence added to a voxel by a ray that ends in it,
+  miss: 1                   #   and taken away by a scan whose rays pass through it. Occupied while positive
+
+###############################################################
+# Moving obstacles from the scans themselves (needs map/enabled and dyn_obstacles/enabled)
+###############################################################
+# Port of SANDO's obstacle tracker (paper Section VII): what the rays of a scan ended on is clustered, each
+# cluster is followed by an adaptive Kalman filter (position, velocity, acceleration), and the clusters that
+# move are treated exactly like the observations that arrive on /obstacle_observations. For robots that get
+# no such observations from elsewhere.
+
+tracker:
+  enabled: false
+  leaf_size: 0.1            # [m] voxel grid that thins the scan before clustering
+  cluster_tolerance: 0.4    # [m] points closer than this are one cluster
+  min_cluster_size: 3       # [points]
+  bbox_cutoff: 2.0          # [m] clusters with a longer bounding-box diagonal are dropped (walls)
+  association_distance: 1.0 # [m] a cluster continues the nearest track within this distance
+  adaptive: true            # adapt the filter's noise covariances
+  alpha: 0.9                # forgetting factor of that adaptation; 1.0 --> plain Kalman filter
+  time_to_delete: 5.0       # [s] a track that has not been seen for this long is dropped
+  velocity_threshold: 0.15  # [m/s] slower tracks are not reported: they stay in the static map
+  min_updates: 5            # a track is reported once it has been seen this often
+  bbox_padding: 0.2         # [m] added to each side of a cluster's box, of which only the near faces are seen
+  default_height: 0.6       # [m] height given to obstacles seen by a planar scan
+
