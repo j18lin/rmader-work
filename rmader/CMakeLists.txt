@@ -57,6 +57,17 @@ set_target_properties(dyn_obstacles PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_executable(test_dyn_obstacles src/examples/test_dyn_obstacles.cpp)
 target_link_libraries(test_dyn_obstacles dyn_obstacles)
 
+add_library(corridor_planner STATIC src/dense_qp.cpp src/corridor_planner.cpp src/stsfc.cpp src/voxel_map.cpp src/cloud_tracker.cpp)
+target_include_directories(corridor_planner PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${DECOMP_UTIL_INCLUDE_DIRS})
+set_target_properties(corridor_planner PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_executable(test_corridor_planner src/examples/test_corridor_planner.cpp)
+target_link_libraries(test_corridor_planner corridor_planner)
+add_executable(test_voxel_map src/examples/test_voxel_map.cpp)
+target_link_libraries(test_voxel_map corridor_planner)
+add_executable(test_cloud_tracker src/examples/test_cloud_tracker.cpp)
+target_link_libraries(test_cloud_tracker corridor_planner)
+
 add_library(utils STATIC src/utils.cpp)
 target_include_directories (utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(utils PUBLIC ${catkin_LIBRARIES})
@@ -104,7 +115,7 @@ endif()
 
 
 add_executable(${PROJECT_NAME}_node src/rmader_node.cpp src/rmader_ros.cpp src/rmader.cpp )
-target_link_libraries(${PROJECT_NAME}_node PUBLIC ${catkin_LIBRARIES}  solver utils dyn_obstacles)  #${CGAL_LIBS}
+target_link_libraries(${PROJECT_NAME}_node PUBLIC ${catkin_LIBRARIES}  solver utils dyn_obstacles corridor_planner)  #${CGAL_LIBS}
 add_dependencies(${PROJECT_NAME}_node ${catkin_EXPORTED_TARGETS} )
 
 add_executable(test_octopus_search src/examples/test_octopus_search.cpp src/octopus_search.cpp src/bspline_utils.cpp) 
